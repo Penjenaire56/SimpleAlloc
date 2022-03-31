@@ -154,9 +154,13 @@ let analyse (instr : inst list) (initials : SSet.t) =
 let main() = 
     let (variables, instrs) = parse "test/slp_630.txt" in 
     let prog = analyse instrs variables.var_out in 
+    let optiProg = List.filter (fun x -> 
+        match x with 
+        | Move(d,s) -> d <> s 
+        | _ -> true
+    ) prog in 
 
-    List.iter (fun x -> Printf.eprintf "%s \n" (pprintInst x)) (List.rev prog) 
-
+    List.iter (fun x -> Printf.eprintf "%s \n" (pprintInst x)) (List.rev optiProg) 
 ;;
 
 main()
