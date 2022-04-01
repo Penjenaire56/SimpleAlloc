@@ -35,7 +35,7 @@ let rec inter (prog : inst list) (env : int SMap.t) =
             failwith "Operation Inconnue"
     | Move(d,s) :: subL ->
         inter subL (SMap.add d (SMap.find s env) env)
-
+;;
 
 let pprintInst (i : inst) = 
     match i with 
@@ -81,6 +81,7 @@ let read_lines name : string list =
     loop []
 ;;
 
+(* Construit le programme à partir d'un fichier test *)
 let parse (path : string) = 
     let lines = read_lines path in
 
@@ -103,12 +104,15 @@ let parse (path : string) =
         in parse_line { var_in = SSet.empty ; var_out = SSet.empty } lines
 ;;
 
+(* Donne les variables définies pendant une instruction *)
 let defN = function
     | Move(d,_) | Oper(_,d,_,_) -> d
 
+(* Donne les variables utilisés pendant une instruction *)
 let useN = function
     | Move(_, s1) -> SSet.singleton s1
     | Oper(_, _, s1, s2) -> SSet.add s1 (SSet.singleton s2) 
+
 
 let rec aux_update newest k (regs : string IMap.t) (binds : int SMap.t) free = 
     if SSet.is_empty newest then
@@ -124,6 +128,7 @@ let rec aux_update newest k (regs : string IMap.t) (binds : int SMap.t) free =
         let newest = SSet.remove n newest in 
             aux_update newest (k + 1) (IMap.add k n regs) (SMap.add n k binds) free
 
+(* Mets à jour les binds et les variables définies *)
 let update (regs : string IMap.t) (binds : int SMap.t) def newest free k = 
     let r = SMap.find def binds in
     if (SSet.cardinal newest) > 0 then
@@ -136,6 +141,7 @@ let update (regs : string IMap.t) (binds : int SMap.t) def newest free k =
     else   
         (k, ISet.add (SMap.find def binds) free, regs, binds)
 
+(* Construit les nouvelles instructions avec les registres générés automatiquement *)
 let distribute (i : inst) (binds : int SMap.t) (prevbinds : int SMap.t) = 
     let pf = (fun x -> SMap.find x prevbinds) in
     let pg = (fun x -> "r" ^ string_of_int x) in  
@@ -148,7 +154,7 @@ let distribute (i : inst) (binds : int SMap.t) (prevbinds : int SMap.t) =
         | Move(dst, src) -> Move(ph dst, h src)
         | Oper(op, d, s1, s2) -> Oper(op, ph d, h s1, h s2)
 
-
+(* Construit un nouveau programme avec les registres automatiquement alloués *)
 let analyse (instr : inst list) (initials : SSet.t) = 
     let instr = List.rev instr in 
 
