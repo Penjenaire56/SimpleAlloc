@@ -1,3 +1,4 @@
+A0 = A1 + A2
 T1 = A0 + A3
 T2 = A1 + A4
 T3 = A2 + A5
@@ -26,7 +27,7 @@ T25 = A0 x B2
 T26 = A1 x B1
 T27 = A2 x B0
 T28 = A3 x B5
-T29 = A4 x B4 
+T29 = A4 x B4
 T30 = A5 x B3
 T31 = A4 x B5
 T32 = A5 x B4
