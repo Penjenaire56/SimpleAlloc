@@ -1,6 +1,6 @@
 type src = string 
 type dst = string
-type op = string
+type op = Mul | Sum
 
 type inst = 
 | Oper of op * dst * src * src
@@ -27,19 +27,17 @@ let rec inter (prog : inst list) (env : int SMap.t) =
     | Oper(op, d, s1, s2) :: subL -> 
         let s1 = SMap.find s1 env in
         let s2 = SMap.find s2 env in
-        if op = "+" then 
-            inter subL (SMap.add d (s1 + s2) env) 
-        else if op = "x" then
-            inter subL (SMap.add d (s1 * s2) env) 
-        else  
-            failwith "Operation Inconnue"
+        (match op with
+        | Sum -> inter subL (SMap.add d (s1 + s2) env) 
+        | Mul -> inter subL (SMap.add d (s1 * s2) env))
     | Move(d,s) :: subL ->
         inter subL (SMap.add d (SMap.find s env) env)
 ;;
 
 let pprintInst (i : inst) = 
     match i with 
-    | Oper(op, dst, src1, src2) -> dst ^ " = " ^ src1 ^ " " ^ op ^ " " ^ src2  
+    | Oper(Mul , dst, src1, src2) -> dst ^ " = " ^ src1 ^ " * " ^ src2  
+    | Oper(Sum , dst, src1, src2) -> dst ^ " = " ^ src1 ^ " + " ^ src2  
     | Move(dst,src) -> dst ^ " = " ^ src
 ;;
 
@@ -64,8 +62,16 @@ let getOper (line : string list) (v : vars) =
     let v1 = List.nth line 0 in 
     let v2 = List.nth line 2 in 
     let o = List.nth line 3 in 
+    let op = 
+        if o = "+" then 
+            Sum 
+        else if o = "x" then
+            Mul
+        else
+            failwith "Bad operator" 
+    in  
     let v3 = List.nth line 4 in 
-    (addVars (addVars (addVars v v1) v2) v3) , Oper(o, v1, v2, v3)
+    (addVars (addVars (addVars v v1) v2) v3) , Oper(op, v1, v2, v3)
 ;;
 
 let getRegistreNumber (regName : string) = 
@@ -113,27 +119,33 @@ let useN = function
     | Move(_, s1) -> SSet.singleton s1
     | Oper(_, _, s1, s2) -> SSet.add s1 (SSet.singleton s2) 
 
+let popS (newest : SSet.t) = 
+    let n = SSet.choose newest in 
+        (n, SSet.remove n newest) 
+
+let popI (free : ISet.t) = 
+    let n = ISet.choose free in 
+        (n, ISet.remove n free) 
+
+let getFresh free k = 
+    if ISet.is_empty free then 
+        (k + 1, free, k)
+    else let (f,free) = popI free in 
+        (k, free, f)
 
 let rec aux_update newest k (regs : string IMap.t) (binds : int SMap.t) free = 
     if SSet.is_empty newest then
         (k, free, regs, binds)
-    else if not (ISet.is_empty free) then 
-        let n = SSet.choose newest in 
-        let newest = SSet.remove n newest in 
-        let f = ISet.choose free in
-        let free = ISet.remove f free in
+    else 
+        let (k, free, f) = getFresh free k in 
+        let (n, newest) = popS newest in 
             aux_update newest k (IMap.add f n regs) (SMap.add n f binds) free
-    else
-        let n = SSet.choose newest in 
-        let newest = SSet.remove n newest in 
-            aux_update newest (k + 1) (IMap.add k n regs) (SMap.add n k binds) free
 
 (* Mets à jour les binds et les variables définies *)
 let update (regs : string IMap.t) (binds : int SMap.t) def newest free k = 
     let r = SMap.find def binds in
     if (SSet.cardinal newest) > 0 then
-        let n = SSet.choose newest in 
-        let newest = SSet.remove n newest in 
+        let (n, newest) = popS newest in 
         let binds = SMap.add n r binds in  
         let binds = SMap.remove def binds in  
         let regs = IMap.add r n regs in  
@@ -141,18 +153,69 @@ let update (regs : string IMap.t) (binds : int SMap.t) def newest free k =
     else   
         (k, ISet.add (SMap.find def binds) free, regs, binds)
 
-(* Construit les nouvelles instructions avec les registres générés automatiquement *)
-let distribute (i : inst) (binds : int SMap.t) (prevbinds : int SMap.t) = 
-    let pf = (fun x -> SMap.find x prevbinds) in
-    let pg = (fun x -> "r" ^ string_of_int x) in  
-    let ph = (fun x -> pg (pf x)) in 
+let getRegistreName (var : string) (binds : int SMap.t) = 
+    "r" ^ (string_of_int (SMap.find var binds))
 
-    let f = (fun x -> SMap.find x binds) in
-    let g = (fun x -> "r" ^ string_of_int x) in  
-    let h = (fun x -> g (f x)) in 
-        match i with
-        | Move(dst, src) -> Move(ph dst, h src)
-        | Oper(op, d, s1, s2) -> Oper(op, ph d, h s1, h s2)
+let getRegistreNames (d,s1,s2) prevbinds binds = 
+    let rdest = getRegistreName d prevbinds in 
+    let rserc1 = getRegistreName s1 binds in 
+    let rserc2 = getRegistreName s2 binds in 
+        (rdest, rserc1, rserc2)
+
+(* Construit les nouvelles instructions avec les registres générés automatiquement *)
+let distribute (i : inst) binds (prevbinds : int SMap.t) (newest : SSet.t) regs k free = 
+    match i with
+    | Move(dst, src) -> 
+        let instrs = [Move(getRegistreName dst prevbinds, getRegistreName src binds)] in 
+            (instrs, k, free, regs, binds)
+
+    | Oper(op, d, s1, s2) when (SSet.mem s1 newest) && (SSet.mem s2 newest) -> 
+        let tmp1 = "tmp1" in 
+        let tmp2 = "tmp2" in 
+        let (k, free, regs, binds) = aux_update (SSet.add tmp2 (SSet.singleton tmp1)) k regs binds free in 
+        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds binds in 
+        let rtmp1 = getRegistreName tmp1 binds in 
+        let rtmp2 = getRegistreName tmp2 binds in 
+        let instrs = [
+                Oper(op, rdest, rtmp1, rtmp2);
+                Move(rtmp1, rserc1);
+                Move(rtmp2, rserc2);
+            ] in 
+            (instrs, k, free, regs, binds)
+
+    | Oper(op, d, s1, s2) when (SSet.mem s1 newest) -> 
+        let tmp1 = "tmp1" in 
+        let (k, free, regs, binds) = aux_update (SSet.singleton tmp1) k regs binds free in 
+        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds binds in 
+        let rtmp1 = getRegistreName tmp1 binds in 
+        let instrs = [
+            Oper(op, rdest, rtmp1, rserc2);
+            Move(rtmp1, rserc1);
+        ] in 
+            (instrs, k, free, regs, binds)
+
+    | Oper(op, d, s1, s2) when (SSet.mem s2 newest) -> 
+        let tmp2 = "tmp2" in 
+        let (k, free, regs, binds) = aux_update (SSet.singleton tmp2) k regs binds free in 
+        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds binds in 
+        let rtmp2 = getRegistreName tmp2 binds in 
+        let instrs = [
+            Oper(op, rdest, rserc1, rtmp2);
+            Move(rtmp2, rserc2)
+        ] in 
+            (instrs, k, free, regs, binds)
+
+    | Oper(op, d, s1, s2) -> 
+        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds binds in 
+        let instrs = [Oper(op, rdest, rserc1, rserc2)] in 
+            (instrs, k, free, regs, binds)
+
+let clean prog =
+    List.filter (fun x -> 
+        match x with 
+        | Move(d,s) -> d <> s 
+        | _ -> true
+    ) prog 
 
 (* Construit un nouveau programme avec les registres automatiquement alloués *)
 let analyse (instr : inst list) (initials : SSet.t) = 
@@ -165,25 +228,30 @@ let analyse (instr : inst list) (initials : SSet.t) =
     let binds = IMap.fold (fun k v m -> SMap.add v k m) regs SMap.empty in
 
     let rec cross (currentVariables : SSet.t) (r : string IMap.t) (bind : int SMap.t) (k : int) (free : ISet.t) = function
-    | [] -> []
+    | [] -> bind, []
     | i :: subL -> 
+        (* Variable déclaré pendant l'instruction *)
         let def = defN i in 
+        
+        (* Variable existant avant l'instruction *)
         let pre = SSet.diff currentVariables (SSet.singleton def) in 
+        
+        (* Variable utilisé pendant l'instruction *)
         let use = useN i in 
+
+        (* Variable déclaré pendant l'instruction et étant nouvelle *)
         let newest = SSet.diff (SSet.diff use pre) currentVariables in 
+
         let previousBind = bind in 
         let (k,free,r,b) = update r bind def newest free k in 
-        let ninst = (distribute i b previousBind) in 
-        ninst :: (cross (SSet.union pre use) r b k free subL)
+        let (instrs, _, _, _, _) = distribute i b previousBind (SSet.diff use newest) r k free in 
 
+        let prim, subL = cross (SSet.union pre use) r b k free subL in 
+
+        prim , (instrs @ subL)
     in 
-    let prog = cross initials regs binds k free instr in 
-    let optiProg = List.filter (fun x -> 
-        match x with 
-        | Move(d,s) -> d <> s 
-        | _ -> true
-    ) (List.rev prog) 
-    in optiProg
+    let (bind, prog) = cross initials regs binds k free instr in 
+    let optiProg = clean prog in (binds, bind, optiProg)
 
 let rec setupTest (values : int list) (v : SSet.t) acc = 
     match values with
@@ -198,7 +266,121 @@ let saveProg (path : string) prog =
     let saveProg = open_out path in 
         List.iter (fun x -> output_string saveProg (pprintInst x ^ "\n")) prog
 
-let main() = 
+let getValueFromName (name : string) = 
+    "(u64)[" ^ 
+        (String.make 1 (String.get name 0)) ^ 
+        " + 64 * " ^ 
+        (String.sub name 1 ((String.length name) - 1)) ^ 
+    "]"
+
+let slpToJasmin dst variables out binds prog stack reg = 
+    let header = "export fn p(reg u64 A, reg u64 B, reg u64 C) {\n" in 
+    let footer = "\n}\n" in 
+    let ret = SMap.fold (fun k v str -> str ^ "\t" ^ (getValueFromName k) ^ " = r" ^ (string_of_int v) ^ ";\n") out "" in 
+    let declaration = 
+        (List.fold_right (fun n str -> str ^ "\tstack u64 " ^ n ^ ";\n") 
+            stack 
+            (List.fold_right (fun n str -> str ^ "\treg u64 " ^ n ^ ";\n") reg "")) in 
+            
+    let assignation = SSet.fold 
+        (fun x str -> "\tr" ^ (string_of_int (SMap.find x binds))
+        ^ " = " ^ (getValueFromName x) 
+        ^ ";\n" ^ str) (variables.var_in) "" 
+    in
+
+    let body = List.fold_right (fun x str -> str ^ "\t" ^ (pprintInst x ^ ";\n")) prog "" in 
+    let saveProg = open_out dst in 
+        output_string saveProg (header ^ declaration ^ assignation ^ body ^ ret ^ footer)
+
+
+let findOccur (i : inst) = 
+    match i with 
+    | Move(dst,src) -> [dst; src]
+    | Oper(_, dst,s1,s2) -> [dst; s1 ; s2]
+
+let spilling (prog : inst list) (k : int) = 
+    let rec spillingMapBuild (prog : inst list) = 
+        match prog with 
+        | [] -> SMap.empty
+        | i :: subL -> 
+            let m = spillingMapBuild subL in 
+            let elements = findOccur i in 
+            List.fold_right (fun e m -> 
+                match SMap.find_opt e m with
+                | None -> SMap.add e 0 m
+                | Some(a) -> SMap.add e (a + 1) m
+            ) elements m
+    in 
+    let m = SMap.fold (fun k v m -> 
+        match IMap.find_opt v m with 
+        | None -> (IMap.add v [k] m) 
+        | Some(l) -> (IMap.add v (k::l) m)) 
+        (spillingMapBuild prog) IMap.empty in 
+    let regs = List.rev (IMap.bindings m) in 
+    let rec split (name : string list) (i : int) accStack accReg = 
+        match name with
+            | [] -> (accStack, accReg)
+            | x :: subL when i < k -> 
+                split subL (i + 1) accStack (x :: accReg)
+            | x :: subL -> 
+                split subL (i + 1) (x :: accStack) accReg
+    in split (List.fold_right (fun (_, l1) l2 -> l1 @ l2) regs []) 0 [] [] 
+
+let stackAlloc (prog : inst list) (stack : string list) = 
+    let progRebuild (i : inst) = 
+        match i with
+        | Oper(o , dst, s1, s2) when (List.mem dst stack) && (List.mem s1 stack) && (List.mem s2 stack) -> 
+            [
+                Move(dst, "tmp");
+                Oper(o, "tmp", "tmp", s2);
+                Move("tmp", s1);
+            ]
+        | Oper(o , dst, s1, s2) when (List.mem s1 stack) && (List.mem s2 stack) -> 
+            [
+                Oper(o, dst, s2, "tmp");
+                Move("tmp", s1);
+            ]
+        | Oper(o , dst, s1, s2) when List.mem dst stack && List.mem s1 stack -> 
+            [
+                Move(dst, "tmp");
+                Oper(o, "tmp", s2, s1);
+            ]
+        | Oper(o , dst, s1, s2) when List.mem dst stack -> 
+            [
+                Move(dst, "tmp");
+                Oper(o, "tmp", s1, s2);
+            ]
+        | Oper(o , dst, s1, s2) when (List.mem s1 stack) -> 
+            [
+                Oper(o, dst, s2, s1);
+            ]
+        | i -> [i]
+    in 
+    let progReorganize (i : inst) = 
+        match i with 
+        | Oper(o , dst, s1, s2) when s2 == dst -> 
+            Oper(o , dst, s2, s1)
+        | _ -> i 
+    in
+    let rec aux_stackAlloc prog = 
+        match prog with 
+        | [] -> []
+        | i :: subL -> 
+           (match progRebuild (progReorganize i) with
+                | [] -> aux_stackAlloc subL
+                | [x] -> x :: (aux_stackAlloc subL)
+                | res -> res @ (aux_stackAlloc subL)
+           )
+    in aux_stackAlloc prog
+
+let build (k : int) (src : string) (dst : string) = 
+    let (variables, instrs) = parse src in
+    let (out, binds, newProg) = analyse instrs variables.var_out in 
+    let (accStack, accReg) = spilling newProg (k - 1) in  
+    let newProg = stackAlloc newProg accStack in 
+        slpToJasmin dst variables out binds newProg accStack ("tmp" :: accReg) 
+
+let testAlloc () = 
     let (variables, instrs) = parse "test/slp_630.txt" in 
     
     let env = setupEnv (SMap.empty) 
@@ -211,7 +393,7 @@ let main() =
         SMap.iter (fun x v -> Printf.eprintf "%s " (x ^ " = " ^ (string_of_int v))) (SMap.filter (fun x _ -> (String.contains x 'C')) exec);
         Printf.eprintf "\n";
 
-    let newProg = analyse instrs variables.var_out in saveProg "test/slp_630_alloc.txt" newProg;
+    let (_, _, newProg) = analyse instrs variables.var_out in saveProg "test/slp_630_alloc.txt" newProg;
     
     Printf.eprintf "Interprétation avec allocation \n"; 
     let env = setupEnv (SMap.empty) 
@@ -221,6 +403,9 @@ let main() =
     in let exec = inter newProg env in 
         SMap.iter (fun x v -> Printf.eprintf "%s " (x ^ " = " ^ (string_of_int v))) (SMap.filter (fun x _ -> (getRegistreNumber x) < 6) exec);
         Printf.eprintf "\n"
+
+let main () = 
+    build 14 "test/slp_630.txt" "test/slp_630.jazz"
 ;;
 
-main()
+main ()
