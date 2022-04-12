@@ -32,14 +32,12 @@ let rec inter (prog : inst list) (env : int SMap.t) =
         | Mul -> inter subL (SMap.add d (s1 * s2) env))
     | Move(d,s) :: subL ->
         inter subL (SMap.add d (SMap.find s env) env)
-;;
 
 let pprintInst (i : inst) = 
     match i with 
     | Oper(Mul , dst, src1, src2) -> dst ^ " = " ^ src1 ^ " * " ^ src2  
     | Oper(Sum , dst, src1, src2) -> dst ^ " = " ^ src1 ^ " + " ^ src2  
     | Move(dst,src) -> dst ^ " = " ^ src
-;;
 
 let addVars (v : vars) (n : string) = 
     if (String.get n 0) = 'C' then {
@@ -50,13 +48,11 @@ let addVars (v : vars) (n : string) =
         var_out = v.var_out;
     }
     else  v
-;;
 
 let getMove (line : string list) (v : vars) = 
     let v1 = List.nth line 0 in 
     let v2 = List.nth line 2 in 
     (addVars (addVars v v1) v2) , Move(v1 , v2) 
-;;
 
 let getOper (line : string list) (v : vars) = 
     let v1 = List.nth line 0 in 
@@ -72,7 +68,6 @@ let getOper (line : string list) (v : vars) =
     in  
     let v3 = List.nth line 4 in 
     (addVars (addVars (addVars v v1) v2) v3) , Oper(op, v1, v2, v3)
-;;
 
 let getRegistreNumber (regName : string) = 
     int_of_string (String.sub regName 1 ((String.length regName) - 1))
@@ -85,7 +80,6 @@ let read_lines name : string list =
         | Some s -> loop (s :: acc)
         | None -> close_in ic; List.rev acc in
     loop []
-;;
 
 (* Construit le programme à partir d'un fichier test *)
 let parse (path : string) = 
@@ -108,7 +102,7 @@ let parse (path : string) =
                 parse_line v subL
 
         in parse_line { var_in = SSet.empty ; var_out = SSet.empty } lines
-;;
+
 
 (* Donne les variables définies pendant une instruction *)
 let defN = function
@@ -380,6 +374,27 @@ let build (k : int) (src : string) (dst : string) =
     let newProg = stackAlloc newProg accStack in 
         slpToJasmin dst variables out binds newProg accStack ("tmp" :: accReg) 
 
+let getIndiceFromName (name : string) = 
+    (String.make 1 (String.get name 0)) ^ "[" ^ (String.sub name 1 ((String.length name) - 1)) ^ "]"
+
+let buildC (src : string) (dst : string) = 
+    let header = "void f(int* A, int* B, int* C){ \n" in 
+    let footer = "\n}\n" in 
+    let translate (i : inst) = 
+        match i with
+        | Move(dst, src) -> dst ^ " = " ^ src ^ ";"
+        | Oper(Mul,dst,s1,s2) -> "int " ^ dst ^ " = " ^ s1 ^ " * " ^ s2 ^ ";"    
+        | Oper(Sum,dst,s1,s2) -> "int " ^ dst ^ " = " ^ s1 ^ " + " ^ s2 ^ ";"  
+    in 
+    let (variables, instrs) = parse src in
+    let declaration = SSet.fold (fun x str -> str ^ "\tint " ^ x ^ ";\n") variables.var_out "" in 
+    let definition = SSet.fold (fun x str -> str ^ "\tint " ^ x ^ " = " ^ (getIndiceFromName x) ^ ";\n") variables.var_in "" in  
+    let cinstrs = List.fold_right (fun x str -> str ^ "\t" ^ (translate x) ^ "\n") (List.rev instrs) "" in 
+    let result = SSet.fold (fun x str -> str ^ "\t" ^ (getIndiceFromName x) ^ " = " ^ x ^ ";\n") variables.var_out "" in 
+    let saveProg = open_out dst in 
+        output_string saveProg (header ^ declaration ^ definition ^ cinstrs ^ result ^ footer)
+
+
 let testAlloc () = 
     let (variables, instrs) = parse "test/slp_630.txt" in 
     
@@ -405,7 +420,8 @@ let testAlloc () =
         Printf.eprintf "\n"
 
 let main () = 
-    build 14 "test/slp_630.txt" "test/slp_630.jazz"
+    build 14 "test/slp_630.txt" "test/slp_630.jazz";
+    buildC "test/slp_630.txt" "test/slp_630.c";
 ;;
 
 main ()
