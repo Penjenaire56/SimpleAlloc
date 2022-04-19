@@ -389,8 +389,8 @@ let spilling (prog : inst list) (k : int) =
     in 
     let m = SMap.fold (fun k v m -> 
         match IMap.find_opt v m with 
-        | None -> (IMap.add v [k] m) 
-        | Some(l) -> (IMap.add v (k::l) m)) 
+        | None -> IMap.add v [k] m
+        | Some(l) -> IMap.add v (k::l) m)
         (spillingMapBuild prog) IMap.empty in 
     let regs = List.rev (IMap.bindings m) in 
     let rec split (name : string list) (i : int) accStack accReg = 
