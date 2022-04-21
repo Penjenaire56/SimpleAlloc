@@ -19,6 +19,15 @@ type vars = {
     var_out : SSet.t
 }
 
+type memory = {
+    k : int;
+    max : int;
+    free : int IMap.t;
+    usage : int IMap.t;
+    regs : string IMap.t;
+    binds : int SMap.t;
+}
+
 let rec setupEnv (env : int SMap.t) (l : (string * int) list) = 
     match l with
     | [] -> env
@@ -59,10 +68,13 @@ let pprintInst (i : inst) =
     | Out(src, name) -> getValueFromName name ^ " = " ^ src
 
 let addVars (v : vars) (n : string) = 
-    if (String.get n 0) = 'C' then {
+    if (String.get n 0) = 'C' || (String.get n 0) = 'c' then {
         var_in = v.var_in;
         var_out = SSet.add n (v.var_out);
     } else if (String.get n 0) = 'A' || (String.get n 0) = 'B' then {
+        var_in = SSet.add n (v.var_in);
+        var_out = v.var_out;
+    } else if (String.get n 0) = 'a' || (String.get n 0) = 'b' then {
         var_in = SSet.add n (v.var_in);
         var_out = v.var_out;
     }
@@ -154,98 +166,77 @@ let reduce (instrs : inst list) =
             aux (aux_reduce instrs) (k - 1) 
         else
             instrs
-    in aux instrs 100
+    in aux instrs 1000
 
 (* Donne les variables définies pendant une instruction *)
 let defN = function
-    | Out(_) -> None
+    | Out(_,_) -> None
     | In(d,_) 
     | Move(d,_) 
     | Oper(_,d,_,_) -> Some(d)
 
 (* Donne les variables utilisés pendant une instruction *)
 let useN = function
-    | In(_) -> SSet.empty
-    | Out(s1,_)
     | Move(_, s1) -> SSet.singleton s1
     | Oper(_, _, s1, s2) -> SSet.add s1 (SSet.singleton s2) 
+    | _ -> SSet.empty
+
+let mem_bind (mem : memory) (n : string) (r : int) = {
+    k = mem.k;
+    max = mem.max;
+    free = mem.free;
+    usage = mem.usage;
+    binds = SMap.add n r mem.binds;
+    regs = IMap.add r n mem.regs;
+}
+
+let mem_free (mem : memory) (v : string) = 
+    let n = SMap.find v mem.binds in 
+    let v = IMap.find n mem.usage in {
+    k = mem.k;
+    max = mem.max;
+    free = IMap.add n v mem.free;
+    usage = IMap.remove n mem.usage;
+    binds = mem.binds;
+    regs = mem.regs;
+}
 
 let popS (newest : SSet.t) = 
     let n = SSet.choose newest in 
         (n, SSet.remove n newest) 
 
-let popGood (free : int IMap.t) = 
-    let rec good lfree maxk maxv =
-        match lfree with 
-        | [] -> (maxk, maxv)
-        | (k,v) :: subL when v > maxv -> 
-            good subL k v
-        | (_,_) :: subL ->
-            good subL maxk maxv
+let getFresh (mem : memory) n = 
+    if IMap.is_empty mem.free then 
+    { 
+        k = mem.k + 1;
+        max = mem.max;
+        free = mem.free;
+        usage = IMap.add mem.k 0 mem.usage;
+        binds = SMap.add n mem.k mem.binds;
+        regs = IMap.add mem.k n mem.regs;
+    } 
+    else let (k, v) = IMap.choose mem.free in {
+        k = mem.k;
+        max = mem.max;
+        free = IMap.remove k mem.free;
+        usage = IMap.add k v mem.usage;
+        binds = SMap.add n k mem.binds;
+        regs = IMap.add k n mem.regs;
+    }
 
-    in good (IMap.bindings free) (-1) (-1)
-
-let popBad (free : int IMap.t) =  
-    let rec bad lfree mink minv =  
-        match lfree with 
-        | [] -> (mink, minv)
-        | (k,v) :: subL when v < minv -> 
-            bad subL k v
-        | (_,_) :: subL ->
-            bad subL mink minv
-
-    in bad (IMap.bindings free) 100000 100000
-
-let popI (free : int IMap.t) (usage : int IMap.t) heur =
-    let (k,v) = if heur < 7 then
-        popGood free
-    else
-        popBad free
-    in
-        (k, IMap.remove k free, IMap.add k v usage) 
-
-let getHeur instrs n = 
-    let rec heuristic n instrs acc =
-        match instrs with 
-        | [] -> 0
-        | i :: subL -> (
-            match i with 
-            | Move(d,_) | Oper(_, d, _,_) | In(d,_) when d = n -> 
-                acc
-            | _ -> 
-                heuristic n subL (acc + 1)
-        ) in 
-    heuristic n instrs 1
-
-let getFresh free usage k instrs n = 
-    let heur = (getHeur instrs n) in 
-    if IMap.is_empty free then 
-        (k + 1, free, IMap.add k 0 usage, k)
-    else let (f,free, usage) = popI free usage heur in 
-        (k, free, usage, f)
-
-let rec aux_update newest k (regs : string IMap.t) (binds : int SMap.t) free usage instrs = 
+let rec aux_update newest (mem : memory) = 
     if SSet.is_empty newest then
-        (k, free, usage, regs, binds)
+        mem
     else 
         let (n, newest) = popS newest in 
-        let (k, free, usage, f) = getFresh free usage k instrs n in 
-            aux_update newest k (IMap.add f n regs) (SMap.add n f binds) free usage instrs
+            aux_update newest (getFresh mem n)
 
 (* Mets à jour les binds et les variables définies *)
-let update (regs : string IMap.t) (binds : int SMap.t) def newest free usage k instrs = 
+let update def newest (mem : memory) = 
     match def with
-    | None -> aux_update newest k regs binds free usage instrs 
+    | None -> aux_update newest mem 
     | Some(def) -> 
-        if (SSet.cardinal newest) > 0 then
-            (* Reranger dans le free pour choisir le meilleur registre *)
-            let n = (SMap.find def binds) in 
-            let v = IMap.find n usage in 
-                aux_update newest k regs binds (IMap.add n v free) (IMap.remove n usage) instrs
-        else   
-            let n = (SMap.find def binds) in 
-            let v = IMap.find n usage in 
-            (k, IMap.add n v free, IMap.remove n usage ,regs, binds)
+        aux_update newest (mem_free mem def)
 
 let getRegistreName (var : string) (binds : int SMap.t) = 
     "r" ^ (string_of_int (SMap.find var binds))
@@ -257,31 +248,32 @@ let getRegistreNames (d,s1,s2) prevbinds binds =
         (rdest, rserc1, rserc2)
 
 (* Construit les nouvelles instructions avec les registres générés automatiquement *)
-let distribute (i : inst) binds (prevbinds : int SMap.t) (newest : SSet.t) regs k free usage instrs = 
+let distribute (i : inst) (prevbinds : int SMap.t) (newest : SSet.t) mem = 
     match i with
     | Move(dst, src) -> 
-        [Move(getRegistreName dst prevbinds, getRegistreName src binds)]
+        [Move(getRegistreName dst prevbinds, getRegistreName src mem.binds)] , mem
     | In(src, name) -> 
-        [In(getRegistreName src binds, name)]
+        [In(getRegistreName src mem.binds, name)] , mem
     | Out(dst, name) -> 
-        [Out(getRegistreName dst binds, name)]
+        [Out(getRegistreName dst mem.binds, name)] , mem
     | Oper(op, d, s1, s2) when (SSet.mem s1 newest) && (SSet.mem s2 newest) -> 
         let tmp1 = "tmp1" in 
-        let (_, _, _, _, binds) = aux_update (SSet.singleton tmp1) k regs binds free usage instrs in 
-        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds binds in 
-        let rtmp1 = getRegistreName tmp1 binds in 
+        let mem = aux_update (SSet.singleton tmp1) mem in 
+        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds mem.binds in 
+        let rtmp1 = getRegistreName tmp1 mem.binds in 
         [
             Oper(op, rdest, rtmp1, rserc2);
             Move(rtmp1, rserc1);
-        ]
+        ] ,
+        mem_free mem tmp1 
     | Oper(op, d, s1, s2) when (SSet.mem s1 newest) -> 
-        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds binds in 
+        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds mem.binds in 
         [
             Oper(op, rdest, rserc2, rserc1);
-        ]
+        ] , mem
     | Oper(op, d, s1, s2) -> 
-        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds binds in 
-            [Oper(op, rdest, rserc1, rserc2)] 
+        let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds mem.binds in 
+            [Oper(op, rdest, rserc1, rserc2)] , mem
 
 let clean prog =
     List.filter (fun x -> 
@@ -290,27 +282,60 @@ let clean prog =
         | _ -> true
     ) prog 
 
-let update_usage (usage : int IMap.t) (binds : int SMap.t) (vars : SSet.t) = 
-    SSet.fold (fun s u -> 
-        let k = (SMap.find s binds) in
-        IMap.add k ((IMap.find k u) + 1) u
-    ) vars usage
+let update_usage (mem : memory) (vars : SSet.t) = {
+    k = mem.k;
+    max = mem.max;
+    free = mem.free;
+    usage = 
+        SSet.fold (fun s u -> 
+            let k = (SMap.find s mem.binds) in
+            let v = IMap.find_opt k u in 
+            match v with
+            | None -> u 
+            | Some(v) -> (IMap.add k (v + 1) u)
+    ) vars mem.usage;
+    binds = mem.binds;
+    regs = mem.regs;
+}
 
-(* Construit un nouveau programme avec les registres automatiquement alloués *)
-let analyse (instr : inst list) (initials : SSet.t) = 
-    let instr = List.rev instr in 
-
-    let free = IMap.empty in 
-
+let init (initials : SSet.t) (max : int) = (* TODO stack if enougth variables *)
     let (k, regs, usage) = SSet.fold 
         (fun s (k,m,u) -> k + 1, (IMap.add k s m), (IMap.add k 0 u)) 
         initials (0, IMap.empty, IMap.empty) 
-    in 
+    in let binds = IMap.fold (fun k v m -> SMap.add v k m) regs SMap.empty 
+    in {
+        k = k;
+        max = max;
+        free = IMap.empty; 
+        usage = usage;
+        regs = regs;
+        binds = binds;
+    }
 
-    let binds = IMap.fold (fun k v m -> SMap.add v k m) regs SMap.empty in
+(* Construit un nouveau programme avec les registres automatiquement alloués *)
+let analyse (instr : inst list) (initials : SSet.t) (max : int) = 
+    let instr = List.rev instr in 
 
-    let rec cross (variables : SSet.t) (r : string IMap.t) (bind : int SMap.t) (k : int) (free : int IMap.t) (usage : int IMap.t) = function
-    | [] -> []
+    let mem = init initials max in
+    
+    let rec cross (variables : SSet.t) (mem : memory) = function
+    | [] -> 
+        let acc = (IMap.bindings mem.usage) @ (IMap.bindings mem.free) in 
+        let acc = List.sort (fun (_,x) (_,y) -> Int.compare x y) acc in 
+        let acc = List.rev acc in 
+
+        let rec split k = function 
+        | [] -> [],[]
+        | (x,_) :: subL -> 
+            let (l1,l2) = split (k - 1) subL in 
+                if k > 0 then 
+                    (x :: l1, l2)
+                else 
+                    (l1, x :: l2)
+        in
+
+        let (regAcc, stackAcc) = split mem.max acc in
+        (List.map (fun n -> "r" ^ (string_of_int n)) regAcc, List.map (fun n -> "r" ^ (string_of_int n)) stackAcc) , []
     | i :: subL -> 
         (* Variable déclaré pendant l'instruction *)
         let def = defN i in 
@@ -327,18 +352,17 @@ let analyse (instr : inst list) (initials : SSet.t) =
         (* Variable déclaré pendant l'instruction et étant nouvelle *)
         let newest = SSet.diff (SSet.diff use pre) variables in 
 
-        let previousBind = bind in 
-        let (k,free, usage, r,bind) = update r bind def newest free usage k subL in 
+        let previousBind = mem.binds in 
+        let mem = update def newest mem in 
 
-        let instrs = distribute i bind previousBind (SSet.diff use newest) r k free usage subL in 
+        let mem = update_usage mem use in 
+        let instrs, mem = distribute i previousBind (SSet.diff use newest) mem in 
 
-        let usage = update_usage usage bind use in
-
-        let subL = cross (SSet.union pre use) r bind k free usage subL in 
-            instrs @ subL
+        let (regAcc, stackAcc) , subL = cross (SSet.union pre use) mem subL in 
+            (regAcc, stackAcc) , instrs @ subL
     in 
-    let prog = cross initials regs binds k free usage instr in 
-    let optiProg = clean prog in optiProg
+    let (regAcc, stackAcc), prog = cross initials mem instr in 
+    let optiProg = clean prog in (regAcc, stackAcc), optiProg
 
 let rec setupTest (values : int list) (v : SSet.t) acc = 
     match values with
@@ -366,88 +390,36 @@ let slpToJasmin dst prog stack reg =
     let saveProg = open_out dst in 
         output_string saveProg (header ^ declaration ^ body ^ footer)
 
-
-let findOccur (i : inst) = 
-    match i with 
-    | In(s,_) | Out(s,_) -> [s]
-    | Move(dst,src) -> [dst; src]
-    | Oper(_, dst,s1,s2) -> [dst; s1 ; s2]
-
-
-let spilling (prog : inst list) (k : int) = 
-    let rec spillingMapBuild (prog : inst list) = 
-        match prog with 
-        | [] -> SMap.empty
-        | i :: subL -> 
-            let m = spillingMapBuild subL in 
-            let elements = findOccur i in 
-            List.fold_right (fun e m -> 
-                match SMap.find_opt e m with
-                | None -> SMap.add e 0 m
-                | Some(a) -> SMap.add e (a + 1) m
-            ) elements m
-    in 
-    let m = SMap.fold (fun k v m -> 
-        match IMap.find_opt v m with 
-        | None -> IMap.add v [k] m
-        | Some(l) -> IMap.add v (k::l) m)
-        (spillingMapBuild prog) IMap.empty in 
-    let regs = List.rev (IMap.bindings m) in 
-    let rec split (name : string list) (i : int) accStack accReg = 
-        match name with
-            | [] -> (accStack, accReg)
-            | x :: subL when i < k -> 
-                split subL (i + 1) accStack (x :: accReg)
-            | x :: subL -> 
-                split subL (i + 1) (x :: accStack) accReg
-    in split (List.fold_right (fun (_, l1) l2 -> l1 @ l2) regs []) 0 [] [] 
-
-let stackAlloc (prog : inst list) (stack : string list) = 
-    let progRebuild (i : inst) = 
-        match i with
-        | Oper(o , dst, s1, s2) when (List.mem dst stack) && (List.mem s1 stack) && (List.mem s2 stack) -> 
-            [
-                Move(dst, "tmp");
-                Oper(o, "tmp", "tmp", s2);
-                Move("tmp", s1);
-            ]
-        | Oper(o , dst, s1, s2) when List.mem s1 stack && List.mem s2 stack -> 
-            [
-                Oper(o, dst, "tmp", s2);
-                Move("tmp", s1);
-            ]
-        | Oper(o , dst, s1, s2) when List.mem dst stack && List.mem s1 stack -> 
-            [
-                Move(dst, "tmp");
-                Oper(o, "tmp", s2, s1);
-            ]
-        | Oper(o , dst, s1, s2) when List.mem dst stack -> 
-            [
-                Move(dst, "tmp");
-                Oper(o, "tmp", s1, s2);
-            ]
-        | Oper(o , dst, s1, s2) when List.mem s1 stack -> 
-            [
-                Oper(o, dst, s2, s1);
-            ]
-        | i -> [i]
-    in 
-    let progReorganize (i : inst) = 
-        match i with 
-        | Oper(o , dst, s1, s2) when s2 == dst -> 
-            Oper(o , dst, s2, s1)
-        | _ -> i 
-    in
-    let rec aux_stackAlloc prog = 
-        match prog with 
-        | [] -> []
-        | i :: subL -> 
-           (match progRebuild (progReorganize i) with
-                | [] -> aux_stackAlloc subL
-                | [x] -> x :: (aux_stackAlloc subL)
-                | res -> res @ (aux_stackAlloc subL)
-           )
-    in aux_stackAlloc prog
+let stackAlloc (i : inst) (stack : SSet.t) = 
+    match i with
+    | Oper(o , dst, s1, s2) when (SSet.mem dst stack) && (SSet.mem s1 stack) && (SSet.mem s2 stack) -> 
+        [
+            Move("tmp", s1);
+            Oper(o, "tmp", "tmp", s2);
+            Move(dst, "tmp");
+        ]
+    | Oper(o , dst, s1, s2) when SSet.mem s1 stack && SSet.mem s2 stack -> 
+        [
+            Move("tmp", s1);
+            Oper(o, dst, "tmp", s2);
+        ]
+    | Oper(o , dst, s1, s2) when SSet.mem dst stack && SSet.mem s1 stack -> 
+        [
+            Move("tmp", s1);
+            Oper(o, "tmp", "tmp", s2);
+            Move(dst, "tmp");
+        ]
+    | Oper(o , dst, s1, s2) when SSet.mem dst stack -> 
+        [
+            Oper(o, "tmp", s1, s2);
+            Move(dst, "tmp");
+        ]
+    | Oper(o , dst, s1, s2) when SSet.mem s1 stack -> 
+        [
+            Oper(o, dst, s2, s1);
+        ]
+    | i -> [i]
+    
 
 let buildIn (var_in : SSet.t) = 
     let rec _buildIn (var_in : SSet.t) acc = 
@@ -483,27 +455,77 @@ let rec insertOut (prog : inst list) (var_out : SSet.t) =
         let var_in = SSet.remove v var_out in 
             insertOut (insertOut_aux prog v) var_in
 
-let rec stackOpti (prog : inst list) stack reg = 
+let pickWorst (t : SSet.t) (prog : inst list) = 
+    let rec pick (s : string) k = function
+    | [] -> k
+    | i :: subL -> 
+        (match i with
+        | Move(dst,src) when dst = s || src = s -> k 
+        | In(dst, _) when dst = s -> k
+        | Out(src,_) when src = s -> k
+        | Oper(_, dst, s1 , s2) when dst = s || s1 = s || s2 = s -> k
+        | _ -> pick s (k + 1) subL)
+    
+    in let lp = SSet.fold (fun k l -> (k, pick k 0 prog) :: l) t [] 
+    in let lp = List.sort (fun (_,x) (_,y) -> Int.compare y x) lp
+    in let (k,v) = (List.hd lp) in 
+    if v > 5 then
+        Some k
+    else 
+        None
+
+let rename (name : string) (reg : string) (sta : string) = 
+    if name = reg then 
+        sta
+    else if name = sta then 
+        reg
+    else 
+        name
+
+let partial (i : inst) (reg : string) = 
+    match i with 
+    | Move(_,src) -> Move(reg, src)
+    | In(_, v) -> In(reg, v)
+    | Out(src,v) -> Out(src, v)
+    | Oper(o, _, s1 , s2) -> Oper(o, reg, s1,s2)   
+
+let spill (i : inst) (sta : string) (reg : string) = 
+    match i with 
+    | Move(dst,src) -> Move(rename dst reg sta, rename src reg sta)
+    | In(dst, v) -> In(rename dst reg sta, v)
+    | Out(src,v) -> Out(rename src reg sta, v)
+    | Oper(o, dst, s1 , s2) -> Oper(o, rename dst reg sta, rename s1 reg sta, rename s2 reg sta)   
+
+let rec spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) = 
     match prog with
     | [] -> []
-    | [x] -> [x]
-    | x :: y :: subL -> (
-        match x,y with
-        |  Out(s2, v), Move(dst,s1) when dst = s2 -> 
-            Out(s1,v) :: (stackOpti subL stack reg)
-            
-        | _,_ -> x :: (stackOpti (y :: subL) stack reg) 
+    | i :: subL -> 
+        (match defN i with
+        | Some stack when SSet.mem stack accStack -> 
+            (match pickWorst accReg prog with
+            | None ->  (stackAlloc i accStack) @ (spilling subL accReg accStack)  
+            | Some reg ->  
+                let subL = List.map (fun i -> spill i stack reg) subL in 
+                    if SSet.mem stack (useN i) then
+                        Move("tmp", stack) :: 
+                        Move(stack, reg) :: 
+                        (stackAlloc (spill (partial i reg) stack "tmp") accStack) @ 
+                        (spilling subL accReg accStack)
+                    else
+                        Move(stack, reg) :: (stackAlloc (partial i reg) accStack) @ (spilling subL accReg accStack)
+            )
+        | _ -> (stackAlloc i accStack) @ (spilling subL accReg accStack)  
     )
 
-let build (k : int) (src : string) (dst : string) = 
+let build (max : int) (src : string) (dst : string) = 
     let (variables, instrs) = parse src in
     let instrs = (buildIn variables.var_in) @ instrs in
     let instrs = insertOut instrs variables.var_out in 
     let instrs = reduce instrs in 
-    let newProg = analyse instrs variables.var_out in 
-    let (accStack, accReg) = spilling newProg (k - 1) in  
-    let newProg = stackAlloc newProg accStack in 
-    let newProg = stackOpti newProg accStack accReg in 
+    let (accReg, accStack), newProg = analyse instrs variables.var_out (max - 1) in
+    let toSet acc = (List.fold_left (fun s x -> SSet.add x s) SSet.empty acc) in
+    let newProg = spilling (List.rev newProg) (toSet accReg) (toSet accStack) in 
+    let newProg = List.rev newProg in 
         slpToJasmin dst newProg accStack ("tmp" :: accReg) 
 
 let buildC (src : string) (dst : string) = 
@@ -526,34 +548,14 @@ let buildC (src : string) (dst : string) =
         output_string saveProg (header ^ declaration ^ definition ^ cinstrs ^ result ^ footer)
 
 
-let testAlloc () = 
-    let (variables, instrs) = parse "test/slp_630.txt" in 
-    
-    let env = setupEnv (SMap.empty) 
-        [("A0", 1);("A1", 4);("A2", 5);("A3", 8);("A4", 9);("A5", 2);
-        ("B0", 2);("B1", 3);("B2", 6);("B3", 2);("B4", 4);("B5", 0);] 
-    in 
-
-    Printf.eprintf "Interprétation sans allocation \n"; 
-    let exec = inter instrs env in 
-        SMap.iter (fun x v -> Printf.eprintf "%s " (x ^ " = " ^ (string_of_int v))) (SMap.filter (fun x _ -> (String.contains x 'C')) exec);
-        Printf.eprintf "\n";
-
-    let newProg = analyse instrs variables.var_out in 
-        saveProg "test/slp_630_alloc.txt" newProg;
-    
-    Printf.eprintf "Interprétation avec allocation \n"; 
-    let env = setupEnv (SMap.empty) 
-        [("r21", 1);("r24", 4);("r7", 5);("r12", 8);("r11", 9);("r8", 2);
-        ("r18", 2);("r28", 3);("r29", 6);("r2", 2);("r17", 4);("r27", 0);] 
-
-    in let exec = inter newProg env in 
-        SMap.iter (fun x v -> Printf.eprintf "%s " (x ^ " = " ^ (string_of_int v))) (SMap.filter (fun x _ -> (getRegistreNumber x) < 6) exec);
-        Printf.eprintf "\n"
+let doubleMain src dstJasmin dstC = 
+    build 15 src dstJasmin;
+    buildC src dstC;
+;;
 
 let main () = 
-    build 15 "test/slp_630.txt" "test/slp_630.jazz";
-    buildC "test/slp_630.txt" "test/slp_630.c";
+    doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c";
+    (* doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c" *)
 ;;
 
 main ()
