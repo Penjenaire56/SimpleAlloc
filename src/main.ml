@@ -139,7 +139,7 @@ let rec aux_reduce (instrs : inst list) =
         | [] -> []
         | i :: subI -> (
             match i with
-            | Oper(_, dst, _,_) | In(dst,_) -> 
+            | Oper(_, dst, _,_) | In(dst,_) | Move(dst,_) -> 
                 aux_insert subI dst i
             | _ ->  
                 i :: (aux_reduce subI)
@@ -437,19 +437,23 @@ let rec insertOut (prog : inst list) (var_out : SSet.t) =
         | [] -> [Out(i,i)]
         | x :: subL -> (
             match x with
+            | Move(_, src) when src = i ->
+                (Out(i,i)) :: x :: subL
+            | Oper(_,_,s1,s2) when s1 = i || s2 = i ->
+                (Out(i,i)) :: x :: subL
             | Move(dst, _) when dst = i ->
-                x :: (Out(i,i)) :: subL
+                (Out(i,i)) :: x :: subL
             | Oper(_,dst,_,_) when dst = i ->
-                x :: (Out(i,i)) :: subL
+                (Out(i,i)) :: x :: subL
             | In(dst,_) when dst = i ->
-                x :: (Out(i,i)) :: subL
+                (Out(i,i)) :: x :: subL
             | _ -> 
                 x :: (insertOut_aux subL i)
         )
     in
 
     if SSet.is_empty var_out then
-        prog
+       prog
     else
         let v = SSet.choose var_out in 
         let var_in = SSet.remove v var_out in 
@@ -517,10 +521,12 @@ let rec spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) =
         | _ -> (stackAlloc i accStack) @ (spilling subL accReg accStack)  
     )
 
+(* Construit un fichier pour jasmin *)
 let build (max : int) (src : string) (dst : string) = 
     let (variables, instrs) = parse src in
     let instrs = (buildIn variables.var_in) @ instrs in
-    let instrs = insertOut instrs variables.var_out in 
+    let instrs = List.rev (insertOut (List.rev instrs) variables.var_out) in 
+    List.iter (fun x -> Printf.eprintf "%s; \n" (pprintInst x)) instrs;
     let instrs = reduce instrs in 
     let (accReg, accStack), newProg = analyse instrs variables.var_out (max - 1) in
     let toSet acc = (List.fold_left (fun s x -> SSet.add x s) SSet.empty acc) in
@@ -528,6 +534,7 @@ let build (max : int) (src : string) (dst : string) =
     let newProg = List.rev newProg in 
         slpToJasmin dst newProg accStack ("tmp" :: accReg) 
 
+(* Construit un fichier C *)
 let buildC (src : string) (dst : string) = 
     let header = "void f(long* A, long* B, long* C){ \n" in 
     let footer = "\n}\n" in 
@@ -547,15 +554,14 @@ let buildC (src : string) (dst : string) =
     let saveProg = open_out dst in 
         output_string saveProg (header ^ declaration ^ definition ^ cinstrs ^ result ^ footer)
 
-
 let doubleMain src dstJasmin dstC = 
-    build 15 src dstJasmin;
+    build 14 src dstJasmin;
     buildC src dstC;
 ;;
 
 let main () = 
     doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c";
-    (* doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c" *)
+    doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c"
 ;;
 
 main ()
