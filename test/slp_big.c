@@ -1,4 +1,33 @@
-void f(long* a, long* b, long* c){ 
+void f(long* A, long* B, long* C){ 
+	long c0;
+	long c1;
+	long c10;
+	long c11;
+	long c12;
+	long c13;
+	long c14;
+	long c15;
+	long c16;
+	long c17;
+	long c18;
+	long c19;
+	long c2;
+	long c20;
+	long c21;
+	long c22;
+	long c23;
+	long c24;
+	long c25;
+	long c26;
+	long c27;
+	long c28;
+	long c3;
+	long c4;
+	long c5;
+	long c6;
+	long c7;
+	long c8;
+	long c9;
 	long a0 = a[0];
 	long a1 = a[1];
 	long a10 = a[10];
@@ -372,4 +401,3 @@ void f(long* a, long* b, long* c){
 	c[9] = c9;
 
 }
-
