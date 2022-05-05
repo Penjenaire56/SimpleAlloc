@@ -6,6 +6,8 @@ export fn p(reg u64 A, reg u64 B, reg u64 C) {
 	reg u64 r2;
 	reg u64 r1;
 	reg u64 tmp;
+	r1 = [r4 + 8];
+	r1 = [r1 + 0];
 	r1 = r1 ^ -1;
 	r2 = [r4 + 0];
 	r2 = [r2 + 0];
