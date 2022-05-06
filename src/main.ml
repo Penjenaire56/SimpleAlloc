@@ -207,7 +207,7 @@ let getSizeParams pin =
     
 
 let defToInst (d : def) =
-    let max = 60 in 
+    let max = 49 in 
     let env = (getSizeParams d.p_in) in 
     let inst = (def_iToInst d.node) in 
 
@@ -746,16 +746,15 @@ let propagate (instrs : inst list) =
             env, SMap.add name (SMap.find src env) out
         | _ ->
             env , out
-    in
-    
-    let rec aux env out = function
+
+    in let rec aux env out = function
     | [] -> out 
     | i :: subL -> 
         let env, out = aux_propagate i env out in 
             aux env out subL
-    in
+   
+    in aux SMap.empty SMap.empty instrs 
 
-    aux SMap.empty SMap.empty instrs 
 
 
 (* Construit un fichier pour jasmin *)
