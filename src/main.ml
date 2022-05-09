@@ -48,7 +48,7 @@ let read_lines name : string list =
 
 let readSexpr (path : string) = 
     let lines = read_lines path in 
-    let txt = List.fold_left (fun str x -> str ^ x) "" lines in 
+    let txt = String.concat "" lines in 
     prog_of_sexp (Sexplib.Sexp.of_string txt)
 
 let eToStr (exp : e) = 
@@ -610,7 +610,6 @@ let buildIn (var_in : SSet.t) =
                 _buildIn var_in (In(v,n,id,n,true) :: acc)
     in _buildIn var_in []
 
-
 let rec insertOut (prog : inst list) (var_out : SSet.t) = 
     let rec insertOut_aux (instrs : inst list) (i : string) = 
         let v = Var i in 
@@ -620,21 +619,20 @@ let rec insertOut (prog : inst list) (var_out : SSet.t) =
                 [Out(v,n,id,n)]
         | x :: subL -> (
             match x with
-            | Move(_, Var src) when src = i ->
-                let n,id = getArrayOfName i in 
-                    (Out(v,n,id,n)) :: x :: subL
             | Oper(_,_,Var s1, Var s2) when s1 = i || s2 = i ->
                 let n,id = getArrayOfName i in 
                     (Out(v,n,id,n)) :: x :: subL
-            | Move(dst, _) when dst = i ->
-                let n,id = getArrayOfName i in 
-                    (Out(v,n,id,n)) :: x :: subL
-            | Oper(_,dst,_,_) when dst = i ->
-                let n,id = getArrayOfName i in 
-                    (Out(v,n,id,n)) :: x :: subL
-            | In(dst,_,_,_,_) when dst = i ->
-                let n,id = getArrayOfName i in 
-                    (Out(v,n,id,n)) :: x :: subL
+            | Move(_, Var a) 
+            | Oper(_,a,_,_)
+            | In(a,_,_,_,_)
+            | Move(a, _) ->
+                if a = i then
+                    let n,id = getArrayOfName i in 
+                        (Out(v,n,id,n)) :: x :: subL
+                else
+                    x :: (insertOut_aux subL i)
+
+            
             | _ -> 
                 x :: (insertOut_aux subL i)
         )
@@ -683,26 +681,24 @@ let partial (i : inst) (reg : string) =
     | Out(src,d,id,n) -> Out(src, d, id, n)
     | Oper(o, _, s1 , s2) -> Oper(o, reg, s1,s2)   
 
+(* Renomme les variables pour effectuer un spill *)
 let spill (i : inst) (sta : string) (reg : string) = 
+    let rename_src src = 
+        match src with
+        | Var src -> Var(rename src reg sta)
+        | _ -> src
+    in
+    let rename_dst dst = rename dst reg sta in 
+
     match i with 
-    | Move(dst, Var src) -> 
-        Move(rename dst reg sta, Var(rename src reg sta))
     | Move(dst, src) -> 
-        Move(rename dst reg sta, src)
+        Move(rename_dst dst, rename_src src)
     | In(dst, s, id, n, b) -> 
-        In(rename dst reg sta, s, id, n, b)
-    | Out(Var src, d, id, n) -> 
-        Out(Var(rename src reg sta), d, id, n)    
-    | Out(src, s, id, n) -> 
-        Out(src, s, id, n)    
-    | Oper(o, dst, Var s1 , Var s2) -> 
-        Oper(o, rename dst reg sta, Var(rename s1 reg sta), Var(rename s2 reg sta))   
-    | Oper(o, dst, Var s1 , s2) -> 
-        Oper(o, rename dst reg sta, Var(rename s1 reg sta), s2)   
-    | Oper(o, dst, s1 , Var s2) -> 
-        Oper(o, rename dst reg sta, s1, Var(rename s2 reg sta)) 
+        In(rename_dst dst, s, rename_src id, n, b)
+    | Out(src, d, id, n) -> 
+        Out(rename_src src, d, rename_src id, n)
     | Oper(o, dst, s1 , s2) -> 
-        Oper(o, rename dst reg sta, s1, s2) 
+        Oper(o, rename_dst dst, rename_src s1, rename_src s2) 
       
 
 let rec spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) = 
@@ -716,9 +712,10 @@ let rec spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) =
             | Some reg ->  
                 let subL = List.map (fun i -> spill i stack reg) subL in 
                     if SSet.mem stack (useN i) then
+                        
+                        (stackAlloc (spill (partial i reg) stack "tmp") accStack) @ 
                         Move("tmp", Var stack) :: 
                         Move(stack, Var reg) :: 
-                        (stackAlloc (spill (partial i reg) stack "tmp") accStack) @ 
                         (spilling subL accReg accStack)
                     else
                         Move(stack, Var reg) :: (stackAlloc (partial i reg) accStack) @ (spilling subL accReg accStack)
@@ -730,22 +727,32 @@ let rec spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) =
 let propagate (instrs : inst list) = 
     let aux_propagate (i : inst) (env : bool SMap.t) (out : bool SMap.t) = 
         match i with 
+        | Move(dst, Val _) -> 
+            SMap.add dst true env , out
+
         | Move(dst, Var src) -> 
-            SMap.add dst (SMap.find src env) env , out
+            let x = SMap.find src env in
+            SMap.add dst x env , out
+
         | In(dst, _, _, _, b) -> 
             SMap.add dst b env , out
+
         | Oper(_,d,Var s1, Var s2) -> 
             let sta1 = SMap.find s1 env in 
             let sta2 = SMap.find s2 env in 
                 SMap.add d (sta1 && sta2) env , out
+
         | Oper(_,d, _, Var s) | Oper(_,d, Var s, _) -> 
             SMap.add d (SMap.find s env) env , out
+
         | Oper(_,d, _, _) -> 
             SMap.add d true env , out
+
         | Out(Var src, _, _, name) -> 
             env, SMap.add name (SMap.find src env) out
-        | _ ->
-            env , out
+
+        | Out(Val _ ,_,_,name) -> env, SMap.add name true out
+
 
     in let rec aux env out = function
     | [] -> out 
@@ -754,8 +761,6 @@ let propagate (instrs : inst list) =
             aux env out subL
    
     in aux SMap.empty SMap.empty instrs 
-
-
 
 (* Construit un fichier pour jasmin *)
 let build (max : int) (src : string) (dst : string) = 
@@ -769,19 +774,29 @@ let build (max : int) (src : string) (dst : string) =
     let newProg = List.rev newProg in 
         slpToJasmin dst newProg accStack ("tmp" :: accReg) 
 
+(* Construit un fichier pour jasmin à partir d'un fichier UA0 *)
 let buildUA0 (src : string) (dst : string) = 
+    Printf.eprintf "BUILDUA0...\n";
     let sexpr = readSexpr src in 
+    
+    Printf.eprintf "parsing...\n";
     let (_, instrs) = sexprToInst sexpr in 
     (* let instrs = reduce instrs in *)
+    
+    Printf.eprintf "analyse...\n";
+  
     let (accReg, accStack), newProg = analyse instrs SSet.empty 14 in
+    
     let toSet acc = (List.fold_left (fun s x -> SSet.add x s) SSet.empty acc) in
-    let newProg = spilling (List.rev newProg) (toSet accReg) (toSet accStack) in
-    let res = propagate newProg in
-        SMap.iter (fun x b -> Printf.eprintf "%s - %b\n" x b) res;
-    let newProg = List.rev newProg in 
-        slpToJasmin dst newProg accStack ("tmp" :: accReg) 
-
-
+    
+    Printf.eprintf "spilling...\n";
+    let newProg = spilling newProg (toSet accReg) (toSet accStack) in
+    
+    Printf.eprintf "save...\n";
+    slpToJasmin dst newProg accStack ("tmp" :: accReg) ;
+    let res = propagate (List.rev newProg) in
+        SMap.iter (fun x b -> Printf.eprintf "%s - %b\n" x b) res
+    
 (* Construit un fichier C *)
 let buildC (src : string) (dst : string) = 
     let header = "void f(long* A, long* B, long* C){ \n" in 
@@ -807,7 +822,7 @@ let doubleMain src dstJasmin dstC =
 ;;
 
 let main () = 
-    buildUA0 "test/rectangle.ua0" "test/rectangle.jazz"
+    buildUA0 "test/aes_short.ua0" "test/rectangle.jazz"
 
    (* doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c";
     doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c" *)
