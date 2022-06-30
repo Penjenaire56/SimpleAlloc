@@ -5,11 +5,6 @@ module SSet = Set.Make(String)
 module IMap = Map.Make(Int)
 module SMap = Map.Make(String)
 
-type vars = {
-    var_in : SSet.t;
-    var_out : SSet.t
-}
-
 type memory = {
     k : int;
     max : int;
@@ -19,23 +14,70 @@ type memory = {
     binds : int SMap.t;
 }
 
-type e = 
-    | Var of string
-    | Val of int
+type _var = string 
+type _val = int 
 
-type src = e 
-type dst = string
+type src = 
+    | IO of _var * string * int 
+    | Var of _var
+    | Val of _val
+ 
+type dst = 
+    | DVar of _var
+    | DIO of _var * string * int
+
 type op = 
     OMul | OSum | ODiv | 
     OSub | OMod | OAnd | 
     OOr | OXor | OAndn | 
     OMasked
 
+type index = src
+
 type inst = 
     | Oper of op * dst * src * src
     | Move of dst * src
-    | In of dst * string * src * string * bool
-    | Out of src * string * src * string
+
+let srcToStr (exp : src) = 
+    match exp with
+    | Val i -> string_of_int i
+    | Var s -> s
+    | IO(s,_,_) -> s
+
+let dstToStr (exp : dst) = 
+    match exp with 
+    | DVar s -> s
+    | DIO(s,_,_) -> s 
+
+let getOperStr o = 
+    match o with
+    | OAnd -> " & "
+    | OXor -> " ^ "
+    | OOr -> " | "
+    | _ -> failwith "OPERATOR"
+
+(* Donne les variables définies pendant une instruction *)
+let defN = function
+    | Move(dst,_) | Oper(_,dst,_,_) -> 
+        dstToStr dst
+
+let srcToStrOpt (a : src) = 
+    match a with 
+    | Var a | IO(a,_,_) -> Some a
+    | Val _ -> None
+
+(* Donne les variables utilisés pendant une instruction *)
+let useN = function
+    | Move(_, Val _) -> SSet.empty 
+    | Move(_,s) -> SSet.singleton (srcToStr s)
+    | Oper(_,_, s1, s2) -> (
+        match srcToStrOpt s1, srcToStrOpt s2 with
+        | None, None -> SSet.empty
+        | None, Some s | Some s, None -> 
+            SSet.singleton s
+        | Some s1, Some s2 -> 
+            SSet.add s1 (SSet.singleton s2)
+    )
 
 let read_lines name : string list =
     let ic = open_in name in
@@ -51,34 +93,131 @@ let readSexpr (path : string) =
     let txt = String.concat "" lines in 
     prog_of_sexp (Sexplib.Sexp.of_string txt)
 
-let eToStr (exp : e) = 
-    match exp with
-    | Val(i) -> string_of_int i
-    | Var(s) -> s
-
-let getIndexStr (v : src) = 
-    match v with
-    | Val i -> (string_of_int (i * 8))
-    | Var v -> v ^ " * 8 "
-
-let getOperStr o = 
-    match o with
-    | OAnd -> " & "
-    | OXor -> " ^ "
-    | OOr -> " | "
-    | _ -> failwith "OPERATOR"
-
 let pprintInst (i : inst) = 
+    let printDst dst = 
+        match dst with
+        | DIO(_,x,k) -> "[" ^ x ^ " + " ^ (string_of_int (k * 8)) ^ "]"
+        | _ -> dstToStr dst 
+    in
+    
+    let printSrc src = 
+        match src with
+        | IO(_,x,k) -> "[" ^ x ^ " + " ^ (string_of_int (k * 8)) ^ "]"
+        | _ -> srcToStr src
+    in
+    
     match i with 
     | Oper(o , dst, src1, src2) -> 
-        dst ^ " = " ^ eToStr src1 ^ getOperStr o ^ eToStr src2
+        printDst dst ^ " = " ^ printSrc src1 ^ getOperStr o ^ printSrc src2
     | Move(dst,src) -> 
-        dst ^ " = " ^ eToStr src
-    | In(dst, name,x,_,_) -> 
-        dst ^ " = [" ^ name ^ " + " ^ getIndexStr x ^ "]"
-    | Out(src, name,x,_) ->  
-        "[" ^ name ^ " + " ^ getIndexStr x ^ "] = " ^ eToStr src
+        printDst dst ^ " = " ^ printSrc src
+
+let pprintInstC (i : inst) = 
+    let printDst dst = 
+        match dst with
+        | DIO(_,x,k) -> x ^ " [" ^ string_of_int k ^ "] "
+        | _ -> dstToStr dst 
+    in
     
+    let printSrc src = 
+        match src with
+        | IO(_,x,k) -> x ^ " [" ^ string_of_int k ^ "]"
+        | _ -> srcToStr src
+    in
+    
+    match i with    
+    | Oper(o , dst, src1, src2) -> 
+        printDst dst ^ " = " ^ printSrc src1 ^ getOperStr o ^ printSrc src2 ^ ";"
+    | Move(dst,src) -> 
+        printDst dst ^ " = " ^ printSrc src ^ ";"
+
+let instTest (i1 : inst list) (i2 : inst list) = 
+    let header = "
+btor = Boolector()
+btor.Set_opt(pyboolector.BTOR_OPT_MODEL_GEN, True)
+bvsort = btor.BitVecSort(1)
+" in 
+
+    let footer = "
+res = btor.Sat()
+if res == btor.SAT:
+    btor.Print_model(\"btor\")
+    print(\"sat\")
+elif res == btor.UNSAT:
+    print(\"unsat\")
+else:
+    print(\"unknown\")
+"   in
+    let rec instToTest (i : inst list) (spe : string) v_out v_in = 
+        let getOperTest (o : op) d s1 s2 = 
+            let f = match o with 
+            | OMul -> "Mul" | OSum -> "Add"
+            | ODiv -> "Udiv" | OSub -> "Sub"
+            | OAnd -> "And" | OOr -> "Or"
+            | OXor -> "Xor" | _ -> failwith "Ope"
+            in
+            d ^ " = btor." ^ f ^ "(" ^ s1 ^ "," ^ s2 ^ ")"
+        in
+
+        let append (txt, v_out, v_in) t = t ^ txt , v_out, v_in in
+
+        let dstInEnv dst env = 
+            match dst with 
+            | DIO(s,_,_) -> 
+                SMap.add s (spe ^ s) env , spe ^ s
+            | DVar s -> env, spe ^ s
+        in
+
+        let srcInEnv src env = 
+            match src with 
+            | IO(s,_,_) -> SMap.add s (spe ^ s) env , spe ^ s
+            | Var s -> env, spe ^ s
+            | Val x -> env, "btor.Const(" ^ string_of_int x ^ ", 1)"
+        in
+
+        match i with
+        | [] -> "", v_out, v_in
+        | x :: subL -> (
+            match x with 
+            | Move(dst, src) -> 
+                let v_out , dst = dstInEnv dst v_out in 
+                let v_in , src = srcInEnv src v_in in
+                append (instToTest subL spe v_out v_in) 
+                    ((dst ^ " = " ^ src) ^ "\n")
+
+            | Oper(op , dst, src1, src2) -> 
+                let v_out , dst = dstInEnv dst v_out in 
+                let v_in , s1 = srcInEnv src1 v_in in
+                let v_in , s2 = srcInEnv src2 v_in in
+                    append (instToTest subL spe v_out v_in)
+                    ((getOperTest op dst s1 s2) ^ "\n")      
+        ) 
+    in
+
+    let txt1, v_out1, v_in1 = instToTest i1 "p1_" SMap.empty SMap.empty in 
+    let txt2, v_out2, v_in2 = instToTest i2 "p2_" SMap.empty SMap.empty in
+    let aux_var = SMap.fold (fun x a str -> 
+        str ^ x ^ " = btor.Var(bvsort, \"" ^ x ^ "\")\n" ^ 
+        a ^ " = " ^ x ^ "\n" ^ 
+        (SMap.find x v_in2) ^ " = " ^ x ^ "\n"
+    ) v_in1  ""
+    in
+
+    let txt_out, list_assert = SMap.fold (fun x a (str,l) -> 
+        str ^ x ^ " = btor.Ne(" ^ a ^ ", " ^ (SMap.find x v_out2) ^ ")\n", x :: l
+    ) v_out1 ("" , []) in 
+
+    let rec aux_assert = function
+        | [] -> ""
+        | [x] -> "btor.Assert(" ^ x ^ ")"
+        | x :: y :: subL -> 
+            y ^ " = btor.Or(" ^ x ^ ", " ^ y ^ ")\n" ^ 
+            aux_assert (y :: subL)
+    in
+
+    let prog = aux_var ^ txt1 ^ txt2 ^ txt_out ^ aux_assert list_assert in 
+        header ^ prog ^ footer
+
 let getOp (v : string) = 
     match v with
     | "+" -> OXor
@@ -93,84 +232,128 @@ let arith_opToOp (a : arith_op) =
 let log_opToOp (a : log_op) = 
     match a with 
     | And -> OAnd | Or -> OOr | Xor -> OXor 
-    | Andn -> OAndn | Masked(_) -> OMasked
+    | Andn -> OAndn | Masked _ -> OMasked
+
+let cleanName name =
+    String.concat "" (String.split_on_char '\'' name)
 
 let freshName (k : int) = 
-    (k + 1) , ("tmp" ^ (string_of_int k))
+    k + 1 , "tmp" ^ (string_of_int k)
 
-let rec numToInstr (n : arith_expr) (k : int) = 
+let getIOName name =
+    match String.split_on_char '_' name with
+    | n :: k :: _ -> n , int_of_string k
+    | _ -> failwith "ERROR NAME"
+
+let srcName (name : string) (v_io : SSet.t) (io : (bool * string) SMap.t) k = 
+    if SSet.mem name v_io then 
+        if SMap.mem name io then
+            let _ , n = SMap.find name io in 
+            k , io, [], Var n
+        else
+            (let k, tmp = freshName k in
+            k, SMap.add name (false,tmp) io, [], Var tmp)
+    else 
+        k, io, [], Var name
+
+let dstName (name : string) (v_io : SSet.t) (io : (bool * string) SMap.t) v2 k = 
+    if SSet.mem name v_io then 
+        if SMap.mem name io then (
+            let b, tmp = SMap.find name io in
+            if b then 
+                k, io, [ Move(DVar tmp, v2) ]
+            else
+                let n, x = getIOName name in
+                k, SMap.add name (true,tmp) io, [ Move(DVar tmp, v2); Move(DIO(name, n, x), Var tmp) ]
+        ) else
+            let k, tmp = freshName k in
+            let n, x = getIOName name in
+            k, SMap.add name (true,tmp) io, [ Move(DVar tmp, v2); Move(DIO(name, n, x), Var tmp) ]
+    else 
+        k, io , [ Move(DVar name, v2) ]
+
+let rec numToInstr (n : arith_expr) (k : int) (v_io : SSet.t) (io : (bool * string) SMap.t) = 
     match n with       
-    | Const_e(i) -> k, [] , Val i
-    | Var_e(i) -> k, [] , Var i.name
+    | Const_e i -> k, io, [] , Val i
+    | Var_e i -> srcName (cleanName i.name) v_io io k
     | Op_e (op, n1, n2) -> 
-        let k, i1, v1 = numToInstr n1 k in 
-        let k, i2, v2 = numToInstr n2 k in 
+        let k, io, i1, v1 = numToInstr n1 k v_io io in 
+        let k, io, i2, v2 = numToInstr n2 k v_io io in 
         let k, tmp = freshName k in 
-        k, i1 @ i2 @ [Oper(arith_opToOp op, tmp, v1, v2)], Var tmp
+        k, io, i1 @ i2 @ [Oper(arith_opToOp op, DVar tmp, v1, v2)], Var tmp
 
-let rec varToInstr (v : var) (k : int) (b : bool) = 
+
+let rec varToInstr (v : var) (k : int) (v_io : SSet.t) (io : (bool * string) SMap.t) = 
     match v with 
-    | Var(id) -> 
-        k, [], (id.name,id.name)
+    | Var id -> 
+        let tmp = cleanName id.name in
+            k, v_io, io, [], tmp
+
     | Index(v, n) -> 
-        let k, i1, (rname,v1) = varToInstr v k true in 
-        let k, i2, v2 = numToInstr n k in 
-        let k, tmp = freshName k in
+        let k, v_io, io, i1, v1 = varToInstr v k v_io io in 
+        let k, io, i2, v2 = numToInstr n k v_io io in 
         
-        let name = match v2 with 
-            | Val i -> rname ^ " " ^ (string_of_int i)
-            | _ -> failwith "Error indice"
+        let name = v1 ^ "_" ^ srcToStr v2 in
+        
+        let v_io = if SSet.mem v1 v_io then
+            SSet.add name v_io
+        else
+            v_io
         in
 
-        if b then 
-            k, i1 @ i2 @ [In(tmp, v1, v2, name, true)], (name,tmp)
-        else
-            k, i1 @ i2 @ [Out(Var tmp, v1, v2, name)] , (name,tmp)
+        k, v_io, io, i1 @ i2 , name
+
     | _ -> failwith "varToINst"
 
-let rec exprToInst (e : expr) (k : int) = 
+let rec exprToInst (e : expr) (k : int) (v_io : SSet.t) (io : (bool * string) SMap.t) = 
     match e with
     | Const(i, _) -> 
-        k, [] , Val i
+        k, v_io, io, [] , Val i
     | ExpVar(v) -> 
-        let k, i, (_,v) = varToInstr v k true in 
-            k, i, Var v
+        let k, v_io, io, i1, v = varToInstr v k v_io io in 
+        let k, io, i2, v = srcName v v_io io k in 
+            k, v_io, io, i1 @ i2, v
     | Log(o,e1,e2) -> 
-        let k, i1, v1 = exprToInst e1 k in 
-        let k, i2, v2 = exprToInst e2 k in 
+        let k, v_io, io, i1, v1 = exprToInst e1 k v_io io in 
+        let k, v_io, io, i2, v2 = exprToInst e2 k v_io io in 
         let k, tmp = freshName k in 
-        k, i1 @ i2 @ [Oper(log_opToOp o, tmp, v1,v2)], Var tmp
+        k, v_io, io, i1 @ i2 @ [Oper(log_opToOp o, DVar tmp, v1, v2)] , Var tmp
 
     | Not(e1) -> 
-        let k, i, v = exprToInst e1 k in
+        let k, v_io, io, i, v = exprToInst e1 k v_io io in
         let k, tmp = freshName k in 
-        k, i @ [Oper(OXor, tmp, v, Val (-1))], Var tmp
+        k, v_io, io, i @ [Oper(OXor, DVar tmp, v, Val (-1))] , Var tmp
     | Shift(_, _, _) -> failwith "Expr SHIFT ERROR"
+    | Arith(_, _, _) -> failwith "Expr Arith ERROR"
+    | Shuffle(_,_) -> failwith "Expr Shuffle ERROR"
+    | Bitmask(_, _) -> failwith "Expr Bitmask ERROR"
     | _ -> failwith "Expr ERROR"
 
-let deq_iToInst (d : deq_i) (k : int) = 
+let deq_iToInst (d : deq_i) (k : int) (v_io : SSet.t) (io : (bool * string) SMap.t) = 
     match d with 
     | Eqn(v, exp, _) -> 
         (match v with
         | [] -> failwith "Empty dst"
         | [x] -> 
-            let k, i1, (_,v1) = varToInstr x k false in 
-            let k, i2, v2 = exprToInst exp k in 
-            k, i2 @ Move(v1,v2) :: i1
+            let k, v_io, io, i1, v1 = varToInstr x k v_io io in 
+            let k, v_io, io, i2, v2 = exprToInst exp k v_io io in 
+
+            let k, io, li = dstName v1 v_io io v2 k in
+
+            k, v_io, io, i1 @ i2 @ li
         | _ -> failwith "Too many dst")
-        
     | _ -> failwith "deq_i"
 
-let deqToInst (d : deq list) = 
-    List.fold_right (fun x (k,l) -> 
-        let k',l' = (deq_iToInst x.content k) in
-            k', l' @ l) d (0, [])
+let deqToInst (d : deq list) (v_io : SSet.t) = 
+    (List.fold_right (fun x (k,v_io,io,l) -> 
+        let k',v_io',io',l' = (deq_iToInst x.content k v_io io) in
+            k', v_io', io', l' @ l) d (0, v_io, SMap.empty, []))
 
-let def_iToInst (d : def_i) = 
+let def_iToInst (d : def_i) (v_io : SSet.t) = 
     match d with
     | Single(_, code) ->
-        let _, instrs = deqToInst code in 
-            instrs
+        let _, v_io, io, instrs = deqToInst code v_io in
+            (v_io, io, instrs)
     | _ -> failwith "Error def_i"
 
 type stability = 
@@ -200,82 +383,128 @@ let getSizeParams pin =
     let addSize x m = 
         let name = x.vd_id.name in 
         let size = typeSize x.vd_typ in 
-            SMap.add name (size, 0) m
+            SMap.add (cleanName name) (size, 0) m
     in
     
     List.fold_right addSize pin SMap.empty
-    
 
-let defToInst (d : def) =
-    let max = 49 in 
-    let env = (getSizeParams d.p_in) in 
-    let inst = (def_iToInst d.node) in 
+let defToInst (d : def) (max : int -> bool) shape =
+    let v_io = List.fold_right 
+        (fun x s -> SSet.add (cleanName x.vd_id.name) s) d.p_in SSet.empty
+    in
+    let v_io = List.fold_right 
+        (fun x s -> SSet.add (cleanName x.vd_id.name) s) d.p_out v_io
+    in
 
-    let rec aux env = function
-    | [] -> []
-    | i :: subL -> (
-        match i with
-        | In(dst, src, Val indice, name,  _) -> 
-            let i, env = (
-                match SMap.find_opt src env with 
-                | Some(Len(_), y) -> 
-                    In(dst,src,Val indice, name, (y + indice) < max), env
-                | Some(Dim(_, d), y) -> 
-                    In(dst,src,Val indice, name, true), 
-                    SMap.add dst (d,y + indice * (getSizeStruct d)) env
-                | _ -> 
-                    i, env 
-            ) in i :: aux env subL
-        | _ -> i :: aux env subL
-    ) in
+    let head = v_io in 
 
-    let inst = aux env inst in
-    
-    env, inst
+    let v_io, io, inst = def_iToInst d.node v_io in
+
+    let rec setInputs li inputs env = 
+        match li with
+        | [] -> []
+        | i :: subL -> (
+            let env, ins = SSet.fold (fun x (e,l) -> 
+                if SSet.mem x env then
+                    e, l
+                else if SMap.mem x inputs then (
+                    let name = SMap.find x inputs in 
+                    let n , k = getIOName name in
+                    SSet.add x e, l @ [Move(DVar x , IO(name,n,k))]
+                )
+                else
+                    e, l
+            ) (useN i) (env , []) in 
+            
+            ins @ (i :: (setInputs subL inputs env))
+        )
+    in
+
+    let rec apply shape lp = 
+        match shape, lp with 
+        | [_], [d] -> int_of_string d
+        | s :: shape, d :: lp -> 
+            s * (int_of_string d) + (apply shape lp) 
+        | _ -> failwith "error shape"
+    in
+
+    let f x (i,o) = 
+        match String.split_on_char '_' x with
+        | "key" :: _ :: _ -> 
+            SMap.add x true i,o
+        | "plain" :: lp -> 
+            if List.length lp <> List.length shape then
+                SMap.add x false i , o
+            else
+                let n = apply (List.rev shape) lp in 
+                SMap.add x (max n) i,o
+        | "cipher" :: _ -> 
+            i, SSet.add x o
+        | _ -> i,o
+    in
+
+    let (_in_, _out_) = SSet.fold f v_io (SMap.empty, SSet.empty) in
+
+    let inputs = SMap.fold (fun k _ m ->
+        match SMap.find_opt k io with
+        | Some(_, v) -> 
+            SMap.add v k m
+        | None -> m
+    ) _in_ SMap.empty in
+
+    let inst = setInputs inst inputs SSet.empty in
+
+    (head, _in_,_out_) , inst
 
 (* Récupère les instructions correspondant au prog usuba (+ info sur les tailes) *)
-let sexprToInst (p : prog) = 
+let sexprToInst (p : prog) (max : int -> bool) shape = 
     match p.nodes with 
     | [] -> failwith "Empty program"
-    | f :: _ -> defToInst f
+    | f :: _ -> defToInst f max shape
 
 let getIndiceFromName (name : string) = 
     (String.make 1 (String.get name 0)) ^ "[" ^ (String.sub name 1 ((String.length name) - 1)) ^ "]"
 
-let addVars (v : vars) (n : string) = 
-    match (String.get n 0) with
-    | 'a' | 'A' | 'b' | 'B' -> {
-        var_in = SSet.add n (v.var_in);
-        var_out = v.var_out;
-    }
-    | 'c' | 'C' -> {
-        var_in = v.var_in;
-        var_out = SSet.add n (v.var_out);
-    }
-    | _ -> v
+let addVars (v : SSet.t) (n : string) = 
+    SSet.add n v
 
-let getMove (line : string list) (v : vars) = 
-    let v1 = List.nth line 0 in 
-    let v2 = List.nth line 2 in 
-    (addVars (addVars v v1) v2) , Move(v1 , Var v2) 
+let getIndice (name : string) = 
+    int_of_string (String.sub name 1 ((String.length name) - 1))
 
-let getE (v : string) = 
-    match (String.get v 0) with
-    | '0' .. '9' -> Val (int_of_string v)
-    | _ -> Var v 
+let getDST (s : string) (v : SSet.t) = 
+    match String.get s 0 with
+    | '0' .. '9' -> 
+        failwith "ERROR DST CANT BE A CONST"
+    | c when c = 'A' || c = 'B' || c = 'C' ->
+        let array = String.make 1 c in 
+        let id = getIndice s in 
+            DIO (array ^ string_of_int id, array, id) , addVars v array
+    | _ -> 
+        DVar s, addVars v s
 
-let addIfVar (v : vars) (n : e) = 
-    match n with
-    | Var(x) -> addVars v x
-    | _ -> v
+let getSRC (s : string) (v : SSet.t) = 
+    match String.get s 0 with
+    | '0' .. '9' -> 
+        Val (int_of_string s) ,  v
+    | c when c = 'A' || c = 'B' || c = 'C' ->
+        let array = String.make 1 c in 
+        let id = getIndice s in 
+            IO (array ^ string_of_int id, array, id) , addVars v array
+    | _ -> 
+        Var s, addVars v s
 
-let getOper (line : string list) (v : vars) = 
-    let v1 = (List.nth line 0) in 
-    let v2 = getE (List.nth line 2) in 
+let getMove (line : string list) (v : SSet.t) = 
+    let v1,v = getDST (List.nth line 0) v in 
+    let v2,v = getSRC (List.nth line 2) v in 
+        v,[Move(v1 , v2)]
+
+let getOper (line : string list) (v : SSet.t) = 
+    let v1, v = getDST (List.nth line 0) v in 
+    let v2, v = getSRC (List.nth line 2) v in 
     let o = List.nth line 3 in 
     let op = getOp o in 
-    let v3 = getE (List.nth line 4) in 
-    (addIfVar (addIfVar (addVars v v1) v2) v3) , Oper(op, v1, v2, v3)
+    let v3, v = getSRC (List.nth line 4) v in 
+        v, [Oper(op, v1, v2, v3)]
 
 (* Construit le programme à partir d'un fichier test *)
 let parse (path : string) = 
@@ -286,28 +515,29 @@ let parse (path : string) =
     | x :: subL -> 
         let line = String.split_on_char ' ' x in 
         let len = List.length line in
-            if len = 5 then
-                let (v,i) = getOper line v in
-                let (v,l) = parse_line v subL in 
-                (v, i :: l)
-            else if len = 3 then 
-                let (v,i) = getMove line v in
-                let (v,l) = parse_line v subL in 
-                (v, i :: l)
-            else 
+            if len < 2 then  
                 parse_line v subL
+            else
+                let v,i = 
+                    if len = 5 then
+                        getOper line v
+                    else if len = 3 then 
+                        getMove line v
+                    else 
+                        failwith "format line"
+                in let v,l = parse_line v subL in 
+                    v, i @ l
 
-        in parse_line { var_in = SSet.empty ; var_out = SSet.empty } lines
+        in parse_line SSet.empty lines
 
 let rec aux_reduce (instrs : inst list) =
     match instrs with
         | [] -> []
         | i :: subI -> (
             match i with
-            | Oper(_, dst, _,_) | In(dst,_,_,_,_) | Move(dst,_) -> 
+            | Oper(_, DVar dst, _,_) | Move(DVar dst,_) 
+            | Oper(_, DIO (dst,_,_), _,_) | Move(DIO (dst,_,_),_) -> 
                 aux_insert subI dst i
-            | _ ->  
-                i :: (aux_reduce subI)
         )  
 
 and aux_insert (instrs : inst list) (name : string) (x : inst) = 
@@ -318,8 +548,6 @@ and aux_insert (instrs : inst list) (name : string) (x : inst) =
         | Oper(_, _, Var s1, Var s2) when s1 = name || s2 = name -> 
             x :: i :: aux_reduce subI
         | Move(_, Var s) when s = name -> 
-            x :: i :: subI
-        | Out(Var s,_,_,_) when s = name -> 
             x :: i :: subI
         | _ -> 
             i :: (aux_insert subI name x)
@@ -332,26 +560,6 @@ let reduce (instrs : inst list) =
         else
             instrs
     in aux instrs 1000
-
-(* Donne les variables définies pendant une instruction *)
-let defN = function
-    | Out(_,_,_,_) -> None
-    | In(d,_,_,_,_) 
-    | Move(d,_) 
-    | Oper(_,d,_,_) -> Some(d)
-
-(* Donne les variables utilisés pendant une instruction *)
-let useN = function
-    | Oper(_, _, Var s1, Var s2) -> 
-        SSet.add s1 (SSet.singleton s2) 
-    | Move(_, Var s) 
-    | Oper(_, _, Var s, _) 
-    | Oper(_, _, _, Var s) 
-    | In(_,s,_,_,_) 
-        -> SSet.singleton s
-    | Out(Var s, n,_,_) 
-        -> SSet.add n (SSet.singleton s)  
-    | _ -> SSet.empty
 
 let mem_free (mem : memory) (v : string) = 
     let n = SMap.find v mem.binds in 
@@ -397,16 +605,24 @@ let rec aux_update newest (mem : memory) =
 (* Mets à jour les binds et les variables définies *)
 let update def newest (mem : memory) = 
     match def with
-    | None -> aux_update newest mem 
+    | None ->
+        aux_update newest mem 
     | Some(def) -> 
         aux_update newest (mem_free mem def)
 
-let getRegistreNameDST (var : string) (binds : int SMap.t) = 
+let getRegistreName (var : string) (binds : int SMap.t) = 
     "r" ^ (string_of_int (SMap.find var binds))
 
-let getRegistreNameSRC (var : e) (binds : int SMap.t) = 
+let getRegistreNameDST (var : dst) (binds : int SMap.t) = 
+    match var with
+    | DVar s -> 
+        DVar (getRegistreName s binds)
+    |  _ -> var
+
+let getRegistreNameSRC (var : src) (binds : int SMap.t) = 
     match var with 
-    | Var s -> Var (getRegistreNameDST s binds)
+    | Var s ->  
+        Var (getRegistreName s binds)
     | _ -> var
 
 let getRegistreNames (d,s1,s2) prevbinds binds = 
@@ -415,44 +631,45 @@ let getRegistreNames (d,s1,s2) prevbinds binds =
     let rserc2 = getRegistreNameSRC s2 binds in 
         (rdest, rserc1, rserc2)
 
-let eInSSet (expr : e) (s : SSet.t) = 
+let srcInSSet (expr : src) (s : SSet.t) = 
     match expr with
-    | Var (x) -> SSet.mem x s
+    | IO (x,_,_) | Var x -> 
+        SSet.mem x s
     | _ -> false
+
+let dstInSSet (expr : dst) (s : SSet.t) = 
+    match expr with
+    | DIO (x,_,_) | DVar x -> 
+        SSet.mem x s
 
 (* Construit les nouvelles instructions avec les registres générés automatiquement *)
 let distribute (i : inst) (prevbinds : int SMap.t) (newest : SSet.t) mem = 
     match i with
-    | Move(dst, src) -> 
+    | Move(dst, src) ->
         [Move(getRegistreNameDST dst prevbinds, getRegistreNameSRC src mem.binds)] , mem
-    | In(dst, s, id,name, b) -> 
-        [In(getRegistreNameDST dst mem.binds, getRegistreNameDST s mem.binds, id, name, b)] , mem
-    | Out(src, d, id, name) -> 
-        [Out(getRegistreNameSRC src mem.binds, getRegistreNameDST d mem.binds, id, name)] , mem
-    | Oper(op, d, s1, s2) when (eInSSet s1 newest) && (eInSSet s2 newest) -> 
+    | Oper(op, d, s1, s2) when (srcInSSet s1 newest) && (srcInSSet s2 newest) -> 
         let tmp1 = "tmp1" in 
         let mem = aux_update (SSet.singleton tmp1) mem in 
         let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds mem.binds in 
-        let rtmp1 = getRegistreNameDST tmp1 mem.binds in 
-        let stmp1 = Var rtmp1 in 
-        [
-            Oper(op, rdest, stmp1, rserc2);
-            Move(rtmp1, rserc1);
-        ] ,
-        mem_free mem tmp1 
-    | Oper(op, d, s1, s2) when (eInSSet s1 newest) -> 
+
+        let rtmp1 = getRegistreNameDST (DVar tmp1) mem.binds in
+   
+        let stmp1 = getRegistreNameSRC (match s1 with 
+            | IO(_,_,_) -> s1
+            | _ -> Var tmp1
+        ) mem.binds in
+        
+        [Oper(op, rdest, stmp1, rserc2); Move(rtmp1, rserc1)], mem_free mem tmp1 
+    | Oper(op, d, s1, s2) when (srcInSSet s1 newest) -> 
         let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds mem.binds in 
-        [
-            Oper(op, rdest, rserc2, rserc1);
-        ] , mem
+        [Oper(op, rdest, rserc2, rserc1)] , mem
     | Oper(op, d, s1, s2) -> 
         let rdest, rserc1, rserc2 = getRegistreNames (d,s1,s2) prevbinds mem.binds in 
-            [Oper(op, rdest, rserc1, rserc2)] , mem
+        [Oper(op, rdest, rserc1, rserc2)] , mem
 
 let clean prog =
-    List.filter (fun x -> 
-        match x with 
-        | Move(d,Var s) -> d <> s 
+    List.filter (function
+        | Move(DVar d,Var s) -> d <> s 
         | _ -> true
     ) prog 
 
@@ -460,13 +677,13 @@ let update_usage (mem : memory) (vars : SSet.t) = {
     k = mem.k;
     max = mem.max;
     free = mem.free;
-    usage = 
-        SSet.fold (fun s u -> 
-            let k = (SMap.find s mem.binds) in
-            let v = IMap.find_opt k u in 
-            match v with
-            | None -> u 
-            | Some(v) -> (IMap.add k (v + 1) u)
+    usage = SSet.fold 
+    (fun s u -> 
+        let k = (SMap.find s mem.binds) in
+        let v = IMap.find_opt k u in 
+        match v with
+        | None -> u 
+        | Some(v) -> (IMap.add k (v + 1) u)
     ) vars mem.usage;
     binds = mem.binds;
     regs = mem.regs;
@@ -514,9 +731,7 @@ let analyse (instr : inst list) (initials : SSet.t) (max : int) =
         let def = defN i in 
         
         (* Variable existant avant l'instruction *)
-        let defopt = match def with 
-            | None -> SSet.empty
-            | Some(s) -> SSet.singleton s in 
+        let defopt = SSet.singleton def in 
         let pre = SSet.diff variables defopt in 
 
         (* Variable utilisé pendant l'instruction *)
@@ -525,34 +740,22 @@ let analyse (instr : inst list) (initials : SSet.t) (max : int) =
         (* Variable déclaré pendant l'instruction et étant nouvelle *)
         let newest = SSet.diff (SSet.diff use pre) variables in 
 
-        let previousBind = mem.binds in 
-
-        let mem = update def newest mem in 
+        let previousBind = mem.binds in
+         
+        let mem = update (Some def) newest mem in 
 
         let mem = update_usage mem use in 
         let instrs, mem = distribute i previousBind (SSet.diff use newest) mem in 
-
         let (regAcc, stackAcc) , subL = cross (SSet.union pre use) mem subL in 
             (regAcc, stackAcc) , instrs @ subL
     in 
     let (regAcc, stackAcc), prog = cross initials mem instr in 
     let optiProg = clean prog in (regAcc, stackAcc), optiProg
 
-let rec setupTest (values : int list) (v : SSet.t) acc = 
-    match values with
-    | [] when SSet.is_empty v -> acc
-    | x :: subL -> 
-        let name = SSet.choose v in
-        let v = SSet.remove name v in 
-            setupTest subL v [(name, x)]
-    | _ -> failwith "Inccorect init data"
-
-let saveProg (path : string) prog = 
-    let saveProg = open_out path in 
-        List.iter (fun x -> output_string saveProg (pprintInst x ^ "\n")) prog
-
-let slpToJasmin dst prog stack reg = 
-    let header = "export fn p(reg u64 A, reg u64 B, reg u64 C) {\n" in 
+let slpToJasmin dst prog stack reg head id = 
+    let header = 
+        (SSet.fold(fun x str -> str ^ ", reg u64 " ^ x) head ("export fn p" ^ (string_of_int id) ^ "(reg u64 _tmp")) ^ "){\n"
+    in 
     let footer = "\n}\n" in 
     let declaration = 
         (List.fold_right (fun n str -> str ^ "\tstack u64 " ^ n ^ ";\n") 
@@ -562,33 +765,49 @@ let slpToJasmin dst prog stack reg =
     let body = List.fold_right (fun x str -> str ^ "\t" ^ (pprintInst x ^ ";\n")) prog "" in 
     
     let saveProg = open_out dst in 
-        output_string saveProg (header ^ declaration ^ body ^ footer)
+        output_string saveProg (header ^ declaration ^ body ^ footer);
+        close_out saveProg
+
+let slpToC dst prog stack reg head id = 
+    let header = 
+        (SSet.fold(fun x str -> str ^ ", uint64_t* " ^ x) head ("void p" ^ (string_of_int id) ^ "(uint64_t* _tmp")) ^ "){\n"
+    in
+    let footer = "\n}\n" in 
+    let declaration = 
+        (List.fold_right (fun n str -> str ^ "\tuint64_t " ^ n ^ ";\n")) (stack @ reg) ""
+    in 
+
+    let body = List.fold_right (fun x str -> str ^ "\t" ^ (pprintInstC x ^ "\n")) prog "" in 
+
+    let saveProg = open_out dst in 
+        output_string saveProg (header ^ declaration ^ body ^ footer);
+        close_out saveProg
 
 let stackAlloc (i : inst) (stack : SSet.t) = 
     match i with
-    | Oper(o , dst, s1, s2) when (SSet.mem dst stack) && (eInSSet s1 stack) && (eInSSet s2 stack) -> 
+    | Oper(o , dst, s1, s2) when (dstInSSet dst stack) && (srcInSSet s1 stack) && (srcInSSet s2 stack) -> 
         [
-            Move("tmp", s1);
-            Oper(o, "tmp", Var "tmp", s2);
+            Move(DVar "tmp", s1);
+            Oper(o, DVar "tmp", Var "tmp", s2);
             Move(dst,Var "tmp");
         ]
-    | Oper(o , dst, s1, s2) when eInSSet s1 stack && eInSSet s2 stack -> 
+    | Oper(o , dst, s1, s2) when srcInSSet s1 stack && srcInSSet s2 stack -> 
         [
-            Move("tmp", s1);
+            Move(DVar "tmp", s1);
             Oper(o, dst,Var "tmp", s2);
         ]
-    | Oper(o , dst, s1, s2) when SSet.mem dst stack && eInSSet s1 stack -> 
+    | Oper(o , dst, s1, s2) when dstInSSet dst stack && srcInSSet s1 stack -> 
         [
-            Move("tmp", s1);
-            Oper(o, "tmp",Var "tmp", s2);
+            Move(DVar "tmp", s1);
+            Oper(o, DVar "tmp",Var "tmp", s2);
             Move(dst,Var "tmp");
         ]
-    | Oper(o , dst, s1, s2) when SSet.mem dst stack -> 
+    | Oper(o , dst, s1, s2) when dstInSSet dst stack -> 
         [
-            Oper(o, "tmp", s1, s2);
+            Oper(o, DVar "tmp", s1, s2);
             Move(dst, Var "tmp");
         ]
-    | Oper(o , dst, s1, s2) when eInSSet s1 stack -> 
+    | Oper(o , dst, s1, s2) when srcInSSet s1 stack -> 
         [
             Oper(o, dst, s2, s1);
         ]
@@ -599,73 +818,45 @@ let getArrayOfName (name : string) =
     let c = int_of_string (String.sub name 1 ((String.length name) - 1)) in 
         n,Val c
 
-let buildIn (var_in : SSet.t) = 
-    let rec _buildIn (var_in : SSet.t) acc = 
-    if SSet.is_empty var_in then
-        acc
-    else
-        let v = SSet.choose var_in in 
-        let var_in = SSet.remove v var_in in 
-            let n,id = getArrayOfName v in 
-                _buildIn var_in (In(v,n,id,n,true) :: acc)
-    in _buildIn var_in []
+let isStr (a : src) (s : string) = 
+    match a with 
+    | Val _ -> false
+    | Var a | IO (a,_,_) -> a = s
 
-let rec insertOut (prog : inst list) (var_out : SSet.t) = 
-    let rec insertOut_aux (instrs : inst list) (i : string) = 
-        let v = Var i in 
-        match instrs with
-        | [] -> 
-            let n,id = getArrayOfName i in 
-                [Out(v,n,id,n)]
-        | x :: subL -> (
-            match x with
-            | Oper(_,_,Var s1, Var s2) when s1 = i || s2 = i ->
-                let n,id = getArrayOfName i in 
-                    (Out(v,n,id,n)) :: x :: subL
-            | Move(_, Var a) 
-            | Oper(_,a,_,_)
-            | In(a,_,_,_,_)
-            | Move(a, _) ->
-                if a = i then
-                    let n,id = getArrayOfName i in 
-                        (Out(v,n,id,n)) :: x :: subL
-                else
-                    x :: (insertOut_aux subL i)
+let dstToStr (a : dst) = 
+    match a with 
+    | DVar a | DIO (a,_,_) -> a
 
-            
-            | _ -> 
-                x :: (insertOut_aux subL i)
-        )
+let pickWorst (t : SSet.t) (prog : inst list) (used : SSet.t) = 
+    let dstisStr (d : dst) s = 
+        match d with 
+        | DVar d | DIO (d,_,_) -> d = s
     in
-
-    if SSet.is_empty var_out then
-       prog
-    else
-        let v = SSet.choose var_out in 
-        let var_in = SSet.remove v var_out in 
-            insertOut (insertOut_aux prog v) var_in
-
-let pickWorst (t : SSet.t) (prog : inst list) = 
     let rec pick (s : string) k = function
     | [] -> k
     | i :: subL -> 
         (match i with
-        | Move(dst, Var src) when dst = s || src = s -> k 
-        | In(dst, _, _, _, _) when dst = s -> k
-        | Out(Var src, _, _, _) when src = s -> k
-        | Oper(_, dst, Var s1 , Var s2) when dst = s || s1 = s || s2 = s -> k
-        | Oper(_, dst, Var s1 , _) when dst = s || s1 = s -> k
-        | Oper(_, dst, _ , Var s2) when dst = s || s2 = s -> k
-        | _ -> pick s (k + 1) subL)
+            | Move(dst, src) when dstisStr dst s || isStr src s -> k 
+            | Oper(_, dst, s1 , s2) when dstisStr dst s || isStr s1 s || isStr s2 s -> k
+            | _ -> pick s (k + 1) subL
+        )
     
-    in let lp = SSet.fold (fun k l -> (k, pick k 0 prog) :: l) t [] 
-    in let lp = List.sort (fun (_,x) (_,y) -> Int.compare y x) lp
+    in let default_value s = 
+        match SSet.mem s used with
+        | true -> (-40)
+        | false -> 0
+    
+    in let lp = SSet.fold (fun k l -> (k, pick k (default_value k) prog) :: l) t [] 
+    
+    in let lp = List.sort (fun (_,x) (_,y) -> Int.compare y x) lp 
     in let (k,v) = (List.hd lp) in 
+    
+    (* TODO BETTER SPILLING *)
     if v > 5 then
         Some k
     else 
         None
-
+    
 let rename (name : string) (reg : string) (sta : string) = 
     if name = reg then 
         sta
@@ -675,11 +866,11 @@ let rename (name : string) (reg : string) (sta : string) =
         name
 
 let partial (i : inst) (reg : string) = 
+    let reg = DVar reg in 
     match i with 
     | Move(_,src) -> Move(reg, src)
-    | In(_, s, id, n, b) -> In(reg, s, id, n, b)
-    | Out(src,d,id,n) -> Out(src, d, id, n)
-    | Oper(o, _, s1 , s2) -> Oper(o, reg, s1,s2)   
+    | Oper(o, _, s1 , s2) -> 
+        Oper(o, reg, s1,s2)   
 
 (* Renomme les variables pour effectuer un spill *)
 let spill (i : inst) (sta : string) (reg : string) = 
@@ -688,71 +879,148 @@ let spill (i : inst) (sta : string) (reg : string) =
         | Var src -> Var(rename src reg sta)
         | _ -> src
     in
-    let rename_dst dst = rename dst reg sta in 
+
+    let rename_dst dst = 
+        match dst with
+        | DVar dst -> DVar (rename dst reg sta)
+        | _ -> dst
+    in 
 
     match i with 
     | Move(dst, src) -> 
         Move(rename_dst dst, rename_src src)
-    | In(dst, s, id, n, b) -> 
-        In(rename_dst dst, s, rename_src id, n, b)
-    | Out(src, d, id, n) -> 
-        Out(rename_src src, d, rename_src id, n)
     | Oper(o, dst, s1 , s2) -> 
         Oper(o, rename_dst dst, rename_src s1, rename_src s2) 
       
 
-let rec spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) = 
+let spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) = 
+    let update_used (used : SSet.t) reg stack =
+        match SSet.find_opt reg used, SSet.find_opt stack used with
+        | None, None -> 
+            SSet.add reg used
+        | Some(_), None -> 
+            SSet.add stack used
+        | None, Some(s) ->
+            SSet.add reg (SSet.remove s used)
+        | _ -> used  
+    in
+
+
+    let rec aux (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) (used : SSet.t) = 
     match prog with
     | [] -> []
     | i :: subL -> 
         (match defN i with
-        | Some stack when SSet.mem stack accStack -> 
-            (match pickWorst accReg prog with
-            | None ->  (stackAlloc i accStack) @ (spilling subL accReg accStack)  
-            | Some reg ->  
+        | stack when SSet.mem stack accStack -> 
+            let nused = SSet.add stack used in
+            (match pickWorst accReg prog used with
+            | None -> 
+                (stackAlloc i accStack) @ (aux subL accReg accStack nused)  
+            | Some reg -> 
+                let nused = update_used used reg stack in 
                 let subL = List.map (fun i -> spill i stack reg) subL in 
                     if SSet.mem stack (useN i) then
-                        
-                        (stackAlloc (spill (partial i reg) stack "tmp") accStack) @ 
-                        Move("tmp", Var stack) :: 
-                        Move(stack, Var reg) :: 
-                        (spilling subL accReg accStack)
-                    else
-                        Move(stack, Var reg) :: (stackAlloc (partial i reg) accStack) @ (spilling subL accReg accStack)
+                        if SSet.mem stack nused then
+                            (Move(DVar "tmp", Var stack) :: 
+                            Move(DVar stack, Var reg) :: 
+                            (stackAlloc (spill (partial i reg) stack "tmp") accStack) @ 
+                            (aux subL accReg accStack nused))
+                        else
+                            (stackAlloc (partial i reg) accStack) @ 
+                            (aux subL accReg accStack nused)
+                    else if SSet.mem stack nused then
+                        Move(DVar stack, Var reg) :: 
+                        (stackAlloc (partial i reg) accStack) @ 
+                        (aux subL accReg accStack nused)
+                    else 
+                        (stackAlloc (partial i reg) accStack) @ 
+                        (aux subL accReg accStack nused)
             )
-        | _ -> (stackAlloc i accStack) @ (spilling subL accReg accStack)  
+        | reg -> 
+            (stackAlloc i accStack) @ 
+            (aux subL accReg accStack (SSet.add reg used))
     )
+    in aux prog accReg accStack (SSet.empty)
 
+let generate (instrs : inst list) (init : bool SMap.t) =
+    let testSrc (exp : src) env = 
+        match exp with
+        | Val _ -> true
+        | Var s -> 
+            SMap.find s env
+        | IO (x,_,_) ->
+            SMap.find x env
+    in              
 
-let propagate (instrs : inst list) = 
+    let addDst (exp : dst) b env = 
+        match exp with
+        | DVar s -> SMap.add s b env
+        | DIO (x,_,_) -> SMap.add x b env
+    in
+
+    let rec aux instrs env _f f_ io k = 
+        match instrs with
+        | [] -> _f, f_, io
+        | i :: subL -> (
+            match i with 
+            | Move(dst,src) -> (
+                if testSrc src env then
+                    aux subL (addDst dst true env) (i :: _f) f_ io k
+                else
+                    aux subL (addDst dst false env) _f (i :: f_) io k
+            )
+            | Oper(o, dst, s1, s2) -> 
+                match testSrc s1 env, testSrc s2 env with 
+                | true, true -> 
+                    aux subL (addDst dst true env) (i :: _f) f_ io k
+                | false, true -> 
+                    let tmp = "_tmp" ^ (string_of_int k) in 
+                    let _f  = Move(DIO(tmp,"_tmp",k), s2) :: _f in 
+                    let f_ = Oper(o, dst, s1, Var "tmp_") :: Move(DVar "tmp_", IO(tmp,"_tmp",k)) :: f_ in 
+                    let k = k + 1 in 
+                    aux subL (addDst dst false env) _f f_ (SSet.add tmp io) k
+                | true, false ->
+                    let tmp = "_tmp" ^ (string_of_int k) in 
+                    let _f  = Move(DIO(tmp,"_tmp",k), s1) :: _f in 
+                    let f_ = Oper(o, dst, Var "tmp_", s2) :: Move(DVar "tmp_", IO(tmp,"_tmp",k)) :: f_ in 
+                    let k = k + 1 in 
+                    aux subL (addDst dst false env) _f f_ (SSet.add tmp io) k
+                | false, false -> 
+                    aux subL (addDst dst false env) _f (i :: f_) io k
+        )
+    in 
+    let _f, f_, io = aux instrs init [] [] (SSet.empty) 0 in 
+        (List.rev (clean _f), List.rev (clean f_), io)
+
+let propagate (instrs : inst list) (init : bool SMap.t) = 
+    let testSrc (exp : src) env = 
+        match exp with
+        | Val _ -> true
+        | IO(s,_,_) | Var s -> 
+            SMap.find s env 
+        in              
+
+    let addDst (exp : dst) b env = 
+        SMap.add (dstToStr exp) b env
+    in
+
     let aux_propagate (i : inst) (env : bool SMap.t) (out : bool SMap.t) = 
         match i with 
-        | Move(dst, Val _) -> 
-            SMap.add dst true env , out
+        | Move(dst, src) -> (
+            let b = testSrc src env in 
+            addDst dst b env, 
+            match dst with
+            | DIO(s,_,_) -> 
+                SMap.add s b out
+            | _ -> out
+        )
 
-        | Move(dst, Var src) -> 
-            let x = SMap.find src env in
-            SMap.add dst x env , out
-
-        | In(dst, _, _, _, b) -> 
-            SMap.add dst b env , out
-
-        | Oper(_,d,Var s1, Var s2) -> 
-            let sta1 = SMap.find s1 env in 
-            let sta2 = SMap.find s2 env in 
-                SMap.add d (sta1 && sta2) env , out
-
-        | Oper(_,d, _, Var s) | Oper(_,d, Var s, _) -> 
-            SMap.add d (SMap.find s env) env , out
-
-        | Oper(_,d, _, _) -> 
-            SMap.add d true env , out
-
-        | Out(Var src, _, _, name) -> 
-            env, SMap.add name (SMap.find src env) out
-
-        | Out(Val _ ,_,_,name) -> env, SMap.add name true out
-
+        | Oper(_, dst, s1, s2) -> (
+            let b1 = testSrc s1 env in 
+            let b2 = testSrc s2 env in 
+            let b = b1 && b2 in 
+                addDst dst b env , out
+        )
 
     in let rec aux env out = function
     | [] -> out 
@@ -760,71 +1028,245 @@ let propagate (instrs : inst list) =
         let env, out = aux_propagate i env out in 
             aux env out subL
    
-    in aux SMap.empty SMap.empty instrs 
+    in aux init SMap.empty instrs 
+
+let buildTest (l : string list) (path : string) = 
+    Printf.printf "BUILD TEST\n";
+    let head = "
+import pyboolector
+from pyboolector import Boolector
+"   in 
+    let saveTest = open_out path in 
+        output_string saveTest (String.concat "" (head :: l))
 
 (* Construit un fichier pour jasmin *)
 let build (max : int) (src : string) (dst : string) = 
-    let (variables, instrs) = parse src in
-    let instrs = (buildIn variables.var_in) @ instrs in
-    let instrs = List.rev (insertOut (List.rev instrs) variables.var_out) in 
-    let instrs = reduce instrs in 
-    let (accReg, accStack), newProg = analyse instrs variables.var_out (max - 1) in
-    let toSet acc = (List.fold_left (fun s x -> SSet.add x s) SSet.empty acc) in
-    let newProg = spilling (List.rev newProg) (toSet accReg) (toSet accStack) in 
-    let newProg = List.rev newProg in 
-        slpToJasmin dst newProg accStack ("tmp" :: accReg) 
+    Printf.printf "BUILD...\n";
+    Printf.printf "parsing...\n";
+    let (_, instrs) = parse src in
+    let instrs = reduce instrs in
+    
+    Printf.printf "analyse...\n";
+    let (accReg, accStack), newProg = analyse instrs SSet.empty (max - 1) in
+    
+    Printf.printf "analyse test...\n";
+    let test1 = instTest instrs (List.rev newProg) in
+
+    Printf.printf "spilling...\n";
+    let toSet acc = List.fold_left (fun s x -> SSet.add x s) SSet.empty acc in
+    let progFinal = spilling (List.rev newProg) (toSet accReg) (toSet accStack) in
+    
+    Printf.printf "spill test...\n";
+    let test2 = instTest (List.rev newProg) progFinal in    
+    
+    let tests = [test1; test2] in 
+
+    buildTest tests ("build_test.py"); 
+    
+    Printf.printf "save...\n";
+    slpToJasmin dst (List.rev progFinal) accStack ("tmp" :: accReg) (SSet.empty) 0
+
+let rec clearAcc acc instrs = 
+    match acc with
+    | [] -> []
+    | x :: subL -> 
+        if List.for_all (fun i -> (not (SSet.mem x (useN i) || (x = defN i)))) instrs then 
+            clearAcc subL instrs
+        else
+            x :: (clearAcc subL instrs)
+
+let buildUA instrs (dst : string) outs head id =     
+    (* let instrs = reduce instrs in *)
+    Printf.printf "analyse...\n";
+
+    let (accReg, accStack), newProg = analyse instrs outs 10 in
+    Printf.printf "analyse test...\n";
+
+    let test1 = instTest instrs (List.rev newProg) in 
+    let toSet acc = List.fold_left (fun s x -> SSet.add x s) SSet.empty acc in
+
+    Printf.printf "spilling...\n";
+    let progFinal = spilling (List.rev newProg) (toSet accReg) (toSet accStack) in
+
+    Printf.printf "spill test...\n";
+    let test2 = instTest (List.rev newProg) progFinal in 
+
+    Printf.printf "save...\n";
+    slpToC dst (List.rev progFinal) (clearAcc accStack progFinal) ("tmp" :: accReg) head id;
+        (test1, test2)
+
+let rec iter (k : int) (f : int -> unit) (b : bool)  = 
+    if k > 0 then
+        if b then
+            (f (k - 1); iter (k - 1) f b)
+        else
+            (iter (k - 1) f b; f (k - 1))
+    else
+        ()
+
+let rec findFirst max (k : int) (f : int -> int option) = 
+    if k < max then 
+        match f k with 
+        | Some s -> 
+            Some s
+        | None -> 
+            findFirst max (k + 1) f
+    else
+        None
+
+let printOrder res n = 
+    let b = SMap.find n res in 
+    Printf.printf (if b then "1" else "0")
+
+let rec printMatrix list name env b = 
+    match list with
+    | [] -> printOrder env name
+    | x :: subL -> 
+        iter x (fun k -> printMatrix subL (name ^ "_" ^ (string_of_int k)) env b) b
+
+let rec firstInter list name env y start = 
+    match list with
+    | [] -> 
+        if (SMap.find name env) || y < start then 
+            None
+        else
+            Some y
+
+    | x :: subL -> 
+        findFirst x 8 (fun k -> 
+            let nb = y + (List.fold_right ( * ) subL k) in 
+            let n = name ^ "_" ^ (string_of_int k) in
+            firstInter subL n env nb start 
+        )
+
+let countLogic (instrs : inst list) = 
+    let rec aux k = function
+    | [] -> k
+    | Oper(_,_,_,_) :: subL -> 
+        aux (k + 1) subL
+    | _ :: subL -> 
+        aux k subL
+    in aux 0 instrs
+
+let interference (instrs : inst list) result shape start sizeMax =
+    let addToEnv env out src b =  
+        match src with
+        | Val _ -> env , out
+        | Var s -> SMap.add s b env, out
+        | IO(s,n,_) -> SMap.add s b env, if n = "plain" then SMap.add s b out else out
+    in
+
+    let rec aux_inter (env : bool SMap.t) (out : bool SMap.t) (instrs : inst list) = 
+        match instrs with
+        | [] -> out
+        | i :: subL -> (
+            match i with
+            | Move(dst, src) -> 
+                let b = SMap.find (dstToStr dst) env in 
+                let env, out = addToEnv env out src b in 
+                    aux_inter env out subL
+            | Oper(_, dst, s1,s2) ->
+                let b = SMap.find (dstToStr dst) env in 
+                let env, out = addToEnv env out s1 b in 
+                let env, out = addToEnv env out s2 b in 
+                    aux_inter env out subL
+        )
+    in 
+    let env = aux_inter result SMap.empty (List.rev instrs) in 
+    Printf.printf " (";
+    (match firstInter shape "plain" env 0 start with
+    | None -> Printf.printf "%d" sizeMax;
+    | Some(x) -> Printf.printf "%d" x);
+    Printf.printf ") "
+
+let getDatas (src : string) shape max limit sizeMax = 
+    let rename ma name ins = 
+        SMap.fold (fun k v m -> 
+            let n = match String.split_on_char '_' k with
+            | _ :: l -> (String.concat "_" (name :: l))
+            | _ -> name in 
+                SMap.add n v m
+        ) ma ins 
+    in 
+    let sexpr = readSexpr src in 
+    let aux_get sexpr k = 
+        let (_, ins, _), instrs = sexprToInst sexpr (max k) shape in 
+        let f_ , _f, _ = generate instrs ins in 
+        let result = propagate instrs ins in
+        Printf.printf "%4d : " k;
+        interference instrs result shape k sizeMax;
+
+        Printf.printf "%4d :: %4d " (countLogic f_) (countLogic _f);
+
+        let rec pass ins result =   
+            if SMap.exists (fun _ v -> v) result && SMap.exists (fun _ v -> not v) result then (
+                printMatrix shape "cipher" result false;
+                Printf.printf "\t\t";
+                let ins = rename result "plain" ins in 
+                    let f_ , _f, _ = generate instrs ins in 
+                    Printf.printf "%4d :: %4d " (countLogic f_) (countLogic _f);
+                    let result = propagate instrs ins in
+                    pass ins result
+            ) else ()
+        in
+            pass ins result;
+            Printf.printf "\n";
+    in 
+
+    iter limit (fun k -> aux_get sexpr k) false
 
 (* Construit un fichier pour jasmin à partir d'un fichier UA0 *)
 let buildUA0 (src : string) (dst : string) = 
-    Printf.eprintf "BUILDUA0...\n";
+    Printf.printf "BUILDUA0...\n";
     let sexpr = readSexpr src in 
     
-    Printf.eprintf "parsing...\n";
-    let (_, instrs) = sexprToInst sexpr in 
-    (* let instrs = reduce instrs in *)
-    
-    Printf.eprintf "analyse...\n";
-  
-    let (accReg, accStack), newProg = analyse instrs SSet.empty 14 in
-    
-    let toSet acc = (List.fold_left (fun s x -> SSet.add x s) SSet.empty acc) in
-    
-    Printf.eprintf "spilling...\n";
-    let newProg = spilling newProg (toSet accReg) (toSet accStack) in
-    
-    Printf.eprintf "save...\n";
-    slpToJasmin dst newProg accStack ("tmp" :: accReg) ;
-    let res = propagate (List.rev newProg) in
-        SMap.iter (fun x b -> Printf.eprintf "%s - %b\n" x b) res
-    
-(* Construit un fichier C *)
-let buildC (src : string) (dst : string) = 
-    let header = "void f(long* A, long* B, long* C){ \n" in 
-    let footer = "\n}\n" in 
-    let translate (i : inst) = 
-        match i with
-        | Out(src,_,_,_) -> (getIndiceFromName (eToStr src))  ^ " = " ^ eToStr src ^ ";"
-        | In(dst,_,_,_,_) -> "long " ^ dst ^ " = " ^ (getIndiceFromName dst) ^ ";"
-        | Move(dst,src) -> dst ^ " = " ^ eToStr src ^ ";"
-        | Oper(o,dst,s1,s2) -> "long " ^ dst ^ " = " ^ eToStr s1 ^ getOperStr o ^ eToStr s2 ^ ";"
-    in 
-    let (variables, instrs) = parse src in
-    let declaration = SSet.fold (fun x str -> str ^ "\tlong " ^ x ^ ";\n") variables.var_out "" in 
-    let definition = SSet.fold (fun x str -> str ^ "\tlong " ^ x ^ " = " ^ (getIndiceFromName x) ^ ";\n") variables.var_in "" in  
-    let cinstrs = List.fold_right (fun x str -> str ^ "\t" ^ (translate x) ^ "\n") (List.rev instrs) "" in 
-    let result = SSet.fold (fun x str -> str ^ "\t" ^ (getIndiceFromName x) ^ " = " ^ x ^ ";\n") variables.var_out "" in 
-    let saveProg = open_out dst in 
-        output_string saveProg (header ^ declaration ^ definition ^ cinstrs ^ result ^ footer)
+    Printf.printf "parsing...\n";
+    let (head,ins,outs), instrs = sexprToInst sexpr (fun x -> x >= 32) [128] in 
 
-let doubleMain src dstJasmin dstC = 
-    build 14 src dstJasmin;
-    buildC src dstC;
+    Printf.printf "generate...\n";
+
+    let f_ , _f, io = generate instrs ins in 
+
+    let test2,test3 = buildUA f_ (dst ^ "_1") (SSet.union outs io) head 0 in 
+    let test4,test5 = buildUA _f (dst ^ "_2") outs head 1 in 
+
+    Printf.printf "save f_ _f ...\n";
+    let f = f_ @ _f in 
+    let test1 = instTest instrs f in  
+
+    let tests = [test1; test2; test3; test4; test5] in 
+    buildTest tests "buildUa0_test.py"
+
+let mainGetDatas() = 
+    Printf.printf "aes \n";
+    getDatas "test/aes_short.ua0" [128] (fun x k -> x <=  127 - k) 26 128;
+
+    Printf.printf "rectangle \n";
+    getDatas "test/rectangle_short.ua0" [4;16] (fun x k -> x <=  63 - k) 17 64;
+
+    Printf.printf "present \n";
+    getDatas "test/present_short.ua0" [64] (fun x k -> x <=  63 - k) 64 64;
+
+    Printf.printf "xoodoo \n";
+    getDatas "test/xoodoo_short.ua0" [3;4;16] (fun x k -> x <= 75 - k) 24 192;
+    
+    Printf.printf "gift_bitslice \n";
+    getDatas "test/gift_bitslice_short.ua0" [4;32] (fun x k -> x <= 127 - k) 32 128;
+
+    Printf.printf "photon_bitslice \n";
+    getDatas "test/photon_bitslice_short.ua0" [8;8;4] (fun x k -> x <= 87 - k) 24 256;
+
+    (* Printf.printf "gimli_bitslice \n";
+    getDatas "test/gimli_bitslice_short.ua0" [3;4;32] (fun x k -> x <= 107 - k) 16; *)
+
 ;;
 
-let main () = 
-    buildUA0 "test/aes_short.ua0" "test/rectangle.jazz"
-
-   (* doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c";
+let main () =     
+    (* doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c"; *)
+    (* buildUA0 "test/aes_short.ua0" "test/rectangle.jazz" *) 
+    (* interference "test/aes_short.ua0" *)
+    mainGetDatas()
+    (* doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c";
     doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c" *)
 ;;
 
