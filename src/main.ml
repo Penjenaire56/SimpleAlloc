@@ -1127,13 +1127,13 @@ let rec printMatrix list name env b =
 let rec firstInter list name env y start = 
     match list with
     | [] -> 
-        if (SMap.find name env) || y < start then 
+        if SMap.find name env || y < start then 
             None
         else
             Some y
 
     | x :: subL -> 
-        findFirst x 8 (fun k -> 
+        findFirst x start (fun k -> 
             let nb = y + (List.fold_right ( * ) subL k) in 
             let n = name ^ "_" ^ (string_of_int k) in
             firstInter subL n env nb start 
@@ -1148,7 +1148,15 @@ let countLogic (instrs : inst list) =
         aux k subL
     in aux 0 instrs
 
-let interference (instrs : inst list) result shape start sizeMax =
+let renameio ma name old ins = 
+    SMap.fold (fun k v m -> 
+        let n = match String.split_on_char '_' k with
+        | x :: l when x = old -> (String.concat "_" (name :: l))
+        | _ -> name in 
+            SMap.add n v m
+    ) ma ins 
+
+let interference (instrs : inst list) result shape start sizeMax p =
     let addToEnv env out src b =  
         match src with
         | Val _ -> env , out
@@ -1172,45 +1180,65 @@ let interference (instrs : inst list) result shape start sizeMax =
                     aux_inter env out subL
         )
     in 
-    let env = aux_inter result SMap.empty (List.rev instrs) in 
-    Printf.printf " (";
-    (match firstInter shape "plain" env 0 start with
-    | None -> Printf.printf "%d" sizeMax;
-    | Some(x) -> Printf.printf "%d" x);
-    Printf.printf ") "
+    
+    let rec interf result p = 
+        match p with
+        | 0 ->
+            let env = aux_inter result SMap.empty (List.rev instrs) in 
+            (match firstInter shape "plain" env 0 start with
+                | None -> sizeMax
+                | Some(x) -> x)
+        | k -> 
+            let env = aux_inter result SMap.empty (List.rev instrs) in 
+            let env = renameio env "cipher" "plain" result in 
+                interf env (k - 1)
+    in
+        interf result p  
 
-let getDatas (src : string) shape max limit sizeMax = 
-    let rename ma name ins = 
-        SMap.fold (fun k v m -> 
-            let n = match String.split_on_char '_' k with
-            | _ :: l -> (String.concat "_" (name :: l))
-            | _ -> name in 
-                SMap.add n v m
-        ) ma ins 
-    in 
+let getCalcPass k biti bit p2 p1 = 
+    let f_ = Float.mul (Float.pow 2. (Float.of_int (biti - k))) (Float.of_int p2) in
+    let _f = Float.mul (Float.pow 2. (Float.of_int (k + biti - bit))) (Float.of_int p1) in
+    Float.add f_ _f 
+
+let getDatas (src : string) shape max limit sizeMax nbpass = 
     let sexpr = readSexpr src in 
     let aux_get sexpr k = 
         let (_, ins, _), instrs = sexprToInst sexpr (max k) shape in 
+
+        let porte = countLogic instrs in 
+
         let f_ , _f, _ = generate instrs ins in 
+
+        let test = [instTest instrs (f_ @ _f)] in 
+
         let result = propagate instrs ins in
-        Printf.printf "%4d : " k;
-        interference instrs result shape k sizeMax;
+        let biti = interference instrs result shape k sizeMax 0 in 
+        let porte1 = countLogic f_ in
+        let porte2 = countLogic _f in 
 
-        Printf.printf "%4d :: %4d " (countLogic f_) (countLogic _f);
-
-        let rec pass ins result =   
+        let reference = Float.mul (Float.pow 2. (Float.of_int biti)) (Float.of_int porte) in 
+        
+        let rec pass ins result p res test =   
             if SMap.exists (fun _ v -> v) result && SMap.exists (fun _ v -> not v) result then (
                 printMatrix shape "cipher" result false;
                 Printf.printf "\t\t";
-                let ins = rename result "plain" ins in 
+                let ins = renameio result "plain" "cipher" ins in 
                     let f_ , _f, _ = generate instrs ins in 
-                    Printf.printf "%4d :: %4d " (countLogic f_) (countLogic _f);
                     let result = propagate instrs ins in
-                    pass ins result
-            ) else ()
+                    let bit = interference instrs result shape k sizeMax p in 
+                    let porte1 = countLogic f_ in
+                    let porte2 = countLogic _f in 
+                    let opti = getCalcPass k biti bit porte1 porte2 in
+                    (pass ins result (p + 1) (Float.add res opti) (instTest instrs (f_ @ _f) :: test))
+            ) else 
+                Float.add res (Float.mul reference (Float.of_int (nbpass - p - 1))) , test
         in
-            pass ins result;
-            Printf.printf "\n";
+            let opti,tests = pass ins result 0 (getCalcPass k biti biti porte1 porte2) test in 
+
+            buildTest tests (src ^ "_test_" ^ (string_of_int k) ^ ".py");
+            let nopti = Float.mul reference (Float.of_int nbpass) in 
+
+            Printf.printf "  %F : %F = %F \n" opti nopti (Float.mul 100. (Float.div (Float.sub opti nopti) nopti));
     in 
 
     iter limit (fun k -> aux_get sexpr k) false
@@ -1239,25 +1267,28 @@ let buildUA0 (src : string) (dst : string) =
 
 let mainGetDatas() = 
     Printf.printf "aes \n";
-    getDatas "test/aes_short.ua0" [128] (fun x k -> x <=  127 - k) 26 128;
+    getDatas "test/aes_short.ua0" [128] (fun x k -> x <=  127 - k) 26 128 10;
 
     Printf.printf "rectangle \n";
-    getDatas "test/rectangle_short.ua0" [4;16] (fun x k -> x <=  63 - k) 17 64;
+    getDatas "test/rectangle_short.ua0" [4;16] (fun x k -> x <=  63 - k) 17 64 10;
 
     Printf.printf "present \n";
-    getDatas "test/present_short.ua0" [64] (fun x k -> x <=  63 - k) 64 64;
+    getDatas "test/present_short.ua0" [64] (fun x k -> x <=  63 - k) 64 64 10;
 
     Printf.printf "xoodoo \n";
-    getDatas "test/xoodoo_short.ua0" [3;4;16] (fun x k -> x <= 75 - k) 24 192;
+    getDatas "test/xoodoo_short.ua0" [3;4;16] (fun x k -> x <= 75 - k) 24 192 10;
     
     Printf.printf "gift_bitslice \n";
-    getDatas "test/gift_bitslice_short.ua0" [4;32] (fun x k -> x <= 127 - k) 32 128;
+    getDatas "test/gift_bitslice_short.ua0" [4;32] (fun x k -> x <= 127 - k) 32 128 10;
 
     Printf.printf "photon_bitslice \n";
-    getDatas "test/photon_bitslice_short.ua0" [8;8;4] (fun x k -> x <= 87 - k) 24 256;
+    getDatas "test/photon_bitslice_short.ua0" [8;8;4] (fun x k -> x <= 87 - k) 24 256 10;
+
+    Printf.printf "ace_bitslice_short \n";
+    getDatas "test/ace_bitslice_short.ua0" [5;2;32] (fun x k -> x <= 161 - k) 132 320 10;
 
     (* Printf.printf "gimli_bitslice \n";
-    getDatas "test/gimli_bitslice_short.ua0" [3;4;32] (fun x k -> x <= 107 - k) 16; *)
+    getDatas "test/gimli_bitslice_short.ua0" [3;4;32] (fun x k -> x <= 107 - k) 16 384 10; *)
 
 ;;
 
