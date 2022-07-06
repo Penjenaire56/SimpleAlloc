@@ -1,0 +1,5 @@
+
+						TEMPS		CPU
+2 optimisations	: 	BM_OPTI       4082323 ns      4082254 ns          
+1 optimisation		:	BM_POPTI      4266676 ns      4266580 ns          
+0 optimisation 	: 	BM_NOPTI      4519870 ns      4519694 ns          
