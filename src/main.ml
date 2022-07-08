@@ -1235,6 +1235,7 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
     let (_, _, _), tem = sexprToInst sexpr (fun _ -> false) shape in 
 
     let aux_get sexpr k = 
+        Printf.printf "%d\t" k;
         let (_, ins, _), instrs = sexprToInst sexpr (max k) shape in 
         instTest instrs tem pTest;
 
