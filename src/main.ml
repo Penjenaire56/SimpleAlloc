@@ -131,24 +131,14 @@ let pprintInstC (i : inst) =
     | Move(dst,src) -> 
         printDst dst ^ " = " ^ printSrc src ^ ";"
 
-let instTest (i1 : inst list) (i2 : inst list) = 
-    let header = "
+let instTest (i1 : inst list) (i2 : inst list) pTest = 
+    pTest "
 btor = Boolector()
 btor.Set_opt(pyboolector.BTOR_OPT_MODEL_GEN, True)
 bvsort = btor.BitVecSort(1)
-" in 
+";
 
-    let footer = "
-res = btor.Sat()
-if res == btor.SAT:
-    btor.Print_model(\"btor\")
-    print(\"sat\")
-elif res == btor.UNSAT:
-    print(\"unsat\")
-else:
-    print(\"unknown\")
-"   in
-    let rec instToTest (i : inst list) (spe : string) v_out v_in = 
+    let rec printBodyTest (i : inst list) (spe : string) = 
         let getOperTest (o : op) d s1 s2 = 
             let f = match o with 
             | OMul -> "Mul" | OSum -> "Add"
@@ -159,64 +149,99 @@ else:
             d ^ " = btor." ^ f ^ "(" ^ s1 ^ "," ^ s2 ^ ")"
         in
 
-        let append (txt, v_out, v_in) t = t ^ txt , v_out, v_in in
+        let getSpeSrc src =
+            match src with 
+            | IO(s,_,_) | Var s -> spe ^ s
+            | Val x -> "btor.Const(" ^ string_of_int x ^ ", 1)"
+        in
 
+        match i with
+        | [] -> ()
+        | x :: subL -> (
+            match x with 
+            | Move(dst, src) -> 
+                let dst = spe ^ (dstToStr dst) in 
+                let src = getSpeSrc src in
+                    pTest ((dst ^ " = " ^ src) ^ "\n");
+                    printBodyTest subL spe
+
+
+            | Oper(op , dst, src1, src2) -> 
+                let dst = spe ^ (dstToStr dst) in 
+                let s1 = getSpeSrc src1 in
+                let s2 = getSpeSrc src2 in
+                    pTest ((getOperTest op dst s1 s2) ^ "\n");
+                    printBodyTest subL spe
+    )
+    in
+
+    let rec instToTest (i : inst list) (spe : string) v_out v_in = 
         let dstInEnv dst env = 
             match dst with 
             | DIO(s,_,_) -> 
-                SMap.add s (spe ^ s) env , spe ^ s
-            | DVar s -> env, spe ^ s
+                SMap.add s (spe ^ s) env
+            | _ -> env
         in
 
         let srcInEnv src env = 
             match src with 
-            | IO(s,_,_) -> SMap.add s (spe ^ s) env , spe ^ s
-            | Var s -> env, spe ^ s
-            | Val x -> env, "btor.Const(" ^ string_of_int x ^ ", 1)"
+            | IO(s,_,_) -> SMap.add s (spe ^ s) env
+            | _ -> env
         in
 
         match i with
-        | [] -> "", v_out, v_in
+        | [] -> v_out, v_in
         | x :: subL -> (
             match x with 
             | Move(dst, src) -> 
-                let v_out , dst = dstInEnv dst v_out in 
-                let v_in , src = srcInEnv src v_in in
-                append (instToTest subL spe v_out v_in) 
-                    ((dst ^ " = " ^ src) ^ "\n")
+                let v_out = dstInEnv dst v_out in 
+                let v_in = srcInEnv src v_in in
+                instToTest subL spe v_out v_in
 
-            | Oper(op , dst, src1, src2) -> 
-                let v_out , dst = dstInEnv dst v_out in 
-                let v_in , s1 = srcInEnv src1 v_in in
-                let v_in , s2 = srcInEnv src2 v_in in
-                    append (instToTest subL spe v_out v_in)
-                    ((getOperTest op dst s1 s2) ^ "\n")      
+            | Oper(_ , dst, src1, src2) -> 
+                let v_out = dstInEnv dst v_out in 
+                let v_in = srcInEnv src1 v_in in
+                let v_in = srcInEnv src2 v_in in
+                    instToTest subL spe v_out v_in  
         ) 
     in
 
-    let txt1, v_out1, v_in1 = instToTest i1 "p1_" SMap.empty SMap.empty in 
-    let txt2, v_out2, v_in2 = instToTest i2 "p2_" SMap.empty SMap.empty in
-    let aux_var = SMap.fold (fun x a str -> 
-        str ^ x ^ " = btor.Var(bvsort, \"" ^ x ^ "\")\n" ^ 
+    let v_out1, v_in1 = instToTest i1 "p1_" SMap.empty SMap.empty in 
+    let v_out2, v_in2 = instToTest i2 "p2_" SMap.empty SMap.empty in
+    SMap.iter (fun x a -> 
+        pTest (x ^ " = btor.Var(bvsort, \"" ^ x ^ "\")\n" ^ 
         a ^ " = " ^ x ^ "\n" ^ 
-        (SMap.find x v_in2) ^ " = " ^ x ^ "\n"
-    ) v_in1  ""
-    in
+        (SMap.find x v_in2) ^ " = " ^ x ^ "\n")
+    ) v_in1;
 
-    let txt_out, list_assert = SMap.fold (fun x a (str,l) -> 
-        str ^ x ^ " = btor.Ne(" ^ a ^ ", " ^ (SMap.find x v_out2) ^ ")\n", x :: l
-    ) v_out1 ("" , []) in 
+    printBodyTest i1 "p1_";
+    printBodyTest i2 "p2_";
+
+
+    let list_assert = SMap.fold (fun x a l -> 
+        pTest (x ^ " = btor.Ne(" ^ a ^ ", " ^ (SMap.find x v_out2) ^ ")\n"); x :: l
+    ) v_out1 [] in 
 
     let rec aux_assert = function
-        | [] -> ""
-        | [x] -> "btor.Assert(" ^ x ^ ")"
+        | [] -> ()
+        | [x] -> pTest ("btor.Assert(" ^ x ^ ")")
         | x :: y :: subL -> 
-            y ^ " = btor.Or(" ^ x ^ ", " ^ y ^ ")\n" ^ 
+            pTest (y ^ " = btor.Or(" ^ x ^ ", " ^ y ^ ")\n");
             aux_assert (y :: subL)
     in
 
-    let prog = aux_var ^ txt1 ^ txt2 ^ txt_out ^ aux_assert list_assert in 
-        header ^ prog ^ footer
+    aux_assert list_assert;
+        
+    pTest "
+res = btor.Sat()
+if res == btor.SAT:
+    btor.Print_model(\"btor\")
+    print(\"sat\")
+elif res == btor.UNSAT:
+    print(\"unsat\")
+else:
+    print(\"unknown\")
+"
 
 let getOp (v : string) = 
     match v with
@@ -1030,19 +1055,23 @@ let propagate (instrs : inst list) (init : bool SMap.t) =
    
     in aux init SMap.empty instrs 
 
-let buildTest (l : string list) (path : string) = 
+let buildTest (path : string) = 
     Printf.printf "BUILD TEST\n";
     let head = "
 import pyboolector
 from pyboolector import Boolector
 "   in 
     let saveTest = open_out path in 
-        output_string saveTest (String.concat "" (head :: l))
+        output_string saveTest head;
+        output_string saveTest
 
 (* Construit un fichier pour jasmin *)
 let build (max : int) (src : string) (dst : string) = 
     Printf.printf "BUILD...\n";
     Printf.printf "parsing...\n";
+
+    let pTest = buildTest ("build_test.py") in 
+
     let (_, instrs) = parse src in
     let instrs = reduce instrs in
     
@@ -1050,18 +1079,14 @@ let build (max : int) (src : string) (dst : string) =
     let (accReg, accStack), newProg = analyse instrs SSet.empty (max - 1) in
     
     Printf.printf "analyse test...\n";
-    let test1 = instTest instrs (List.rev newProg) in
+    instTest instrs (List.rev newProg) pTest;
 
     Printf.printf "spilling...\n";
     let toSet acc = List.fold_left (fun s x -> SSet.add x s) SSet.empty acc in
     let progFinal = spilling (List.rev newProg) (toSet accReg) (toSet accStack) in
     
     Printf.printf "spill test...\n";
-    let test2 = instTest (List.rev newProg) progFinal in    
-    
-    let tests = [test1; test2] in 
-
-    buildTest tests ("build_test.py"); 
+    instTest (List.rev newProg) progFinal pTest;   
     
     Printf.printf "save...\n";
     slpToJasmin dst (List.rev progFinal) accStack ("tmp" :: accReg) (SSet.empty) 0
@@ -1075,32 +1100,35 @@ let rec clearAcc acc instrs =
         else
             x :: (clearAcc subL instrs)
 
-let buildUA instrs (dst : string) outs head id =     
+let buildUA instrs (dst : string) outs head id pTest =     
     (* let instrs = reduce instrs in *)
     Printf.printf "analyse...\n";
 
     let (accReg, accStack), newProg = analyse instrs outs 10 in
     Printf.printf "analyse test...\n";
 
-    let test1 = instTest instrs (List.rev newProg) in 
+    instTest instrs (List.rev newProg) pTest; 
     let toSet acc = List.fold_left (fun s x -> SSet.add x s) SSet.empty acc in
 
     Printf.printf "spilling...\n";
     let progFinal = spilling (List.rev newProg) (toSet accReg) (toSet accStack) in
 
     Printf.printf "spill test...\n";
-    let test2 = instTest (List.rev newProg) progFinal in 
+    instTest (List.rev newProg) progFinal pTest;
 
     Printf.printf "save...\n";
-    slpToC dst (List.rev progFinal) (clearAcc accStack progFinal) ("tmp" :: accReg) head id;
-        (test1, test2)
+    slpToC dst (List.rev progFinal) (clearAcc accStack progFinal) ("tmp" :: accReg) head id
 
-let rec iter (k : int) (f : int -> unit) (b : bool)  = 
+let rec iter (k : int) f (b : bool)  = 
     if k > 0 then
         if b then
-            (f (k - 1); iter (k - 1) f b)
+        (
+            f (k - 1) ; iter (k - 1) f b
+        )
         else
-            (iter (k - 1) f b; f (k - 1))
+        (
+            iter (k - 1) f b ; f (k - 1)
+        )
     else
         ()
 
@@ -1122,7 +1150,7 @@ let rec printMatrix list name env b =
     match list with
     | [] -> printOrder env name
     | x :: subL -> 
-        iter x (fun k -> printMatrix subL (name ^ "_" ^ (string_of_int k)) env b) b
+        let _ = iter x (fun k -> printMatrix subL (name ^ "_" ^ (string_of_int k)) env b) b in ()
 
 let rec firstInter list name env y start = 
     match list with
@@ -1202,14 +1230,19 @@ let getCalcPass k biti bit p2 p1 =
 
 let getDatas (src : string) shape max limit sizeMax nbpass = 
     let sexpr = readSexpr src in 
+    let pTest = buildTest (src ^ "_test.py") in 
+
+    let (_, _, _), tem = sexprToInst sexpr (fun _ -> false) shape in 
+
     let aux_get sexpr k = 
         let (_, ins, _), instrs = sexprToInst sexpr (max k) shape in 
+        instTest instrs tem pTest;
 
         let porte = countLogic instrs in 
 
         let f_ , _f, _ = generate instrs ins in 
 
-        let test = [instTest instrs (f_ @ _f)] in 
+        instTest instrs (f_ @ _f) pTest;
 
         let result = propagate instrs ins in
         let biti = interference instrs result shape k sizeMax 0 in 
@@ -1218,7 +1251,7 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
 
         let reference = Float.mul (Float.pow 2. (Float.of_int biti)) (Float.of_int porte) in 
         
-        let rec pass ins result p res test =   
+        let rec pass ins result p res =   
             if SMap.exists (fun _ v -> v) result && SMap.exists (fun _ v -> not v) result then (
                 printMatrix shape "cipher" result false;
                 Printf.printf "\t\t";
@@ -1229,25 +1262,25 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
                     let porte1 = countLogic f_ in
                     let porte2 = countLogic _f in 
                     let opti = getCalcPass k biti bit porte1 porte2 in
-                    (pass ins result (p + 1) (Float.add res opti) (instTest instrs (f_ @ _f) :: test))
+                    instTest instrs (f_ @ _f) pTest;
+                    pass ins result (p + 1) (Float.add res opti)
             ) else 
-                Float.add res (Float.mul reference (Float.of_int (nbpass - p - 1))) , test
+                Float.add res (Float.mul reference (Float.of_int (nbpass - p - 1)))
         in
-            let opti,tests = pass ins result 0 (getCalcPass k biti biti porte1 porte2) test in 
-
-            buildTest tests (src ^ "_test_" ^ (string_of_int k) ^ ".py");
+            let opti = pass ins result 0 (getCalcPass k biti biti porte1 porte2) in 
             let nopti = Float.mul reference (Float.of_int nbpass) in 
-
-            Printf.printf "  %F : %F = %F \n" opti nopti (Float.mul 100. (Float.div (Float.sub opti nopti) nopti));
+            Printf.printf "  %F : %F = %F \n" opti nopti (Float.mul 100. (Float.div (Float.sub opti nopti) nopti))
     in 
 
     iter limit (fun k -> aux_get sexpr k) false
+        
 
 (* Construit un fichier pour jasmin à partir d'un fichier UA0 *)
 let buildUA0 (src : string) (dst : string) = 
     Printf.printf "BUILDUA0...\n";
     let sexpr = readSexpr src in 
-    
+    let pTest = buildTest "buildUa0_test.py" in 
+
     Printf.printf "parsing...\n";
     let (head,ins,outs), instrs = sexprToInst sexpr (fun x -> x >= 32) [128] in 
 
@@ -1255,15 +1288,12 @@ let buildUA0 (src : string) (dst : string) =
 
     let f_ , _f, io = generate instrs ins in 
 
-    let test2,test3 = buildUA f_ (dst ^ "_1") (SSet.union outs io) head 0 in 
-    let test4,test5 = buildUA _f (dst ^ "_2") outs head 1 in 
+    buildUA f_ (dst ^ "_1") (SSet.union outs io) head 0 pTest;
+    buildUA _f (dst ^ "_2") outs head 1 pTest;
 
     Printf.printf "save f_ _f ...\n";
     let f = f_ @ _f in 
-    let test1 = instTest instrs f in  
-
-    let tests = [test1; test2; test3; test4; test5] in 
-    buildTest tests "buildUa0_test.py"
+    instTest instrs f pTest
 
 let mainGetDatas() = 
     Printf.printf "aes \n";
