@@ -1235,7 +1235,6 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
     let (_, _, _), tem = sexprToInst sexpr (fun _ -> false) shape in 
 
     let aux_get sexpr k = 
-        Printf.printf "%d\t" k;
         let (_, ins, _), instrs = sexprToInst sexpr (max k) shape in 
         instTest instrs tem pTest;
 
@@ -1250,9 +1249,14 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
         let porte1 = countLogic f_ in
         let porte2 = countLogic _f in 
 
+        let count r = 
+            SMap.fold (fun _ b x -> if b then x else x + 1) r 0
+        in
+
         let reference = Float.mul (Float.pow 2. (Float.of_int biti)) (Float.of_int porte) in 
-        
-        let rec pass ins result p res =   
+        let tab = Int64.mul (Int64.shift_left 1L (k - 1)) (Int64.of_int (count result)) in
+
+        let rec pass ins result p res tab =   
             if SMap.exists (fun _ v -> v) result && SMap.exists (fun _ v -> not v) result then (
                 printMatrix shape "cipher" result false;
                 Printf.printf "\t\t";
@@ -1263,14 +1267,15 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
                     let porte1 = countLogic f_ in
                     let porte2 = countLogic _f in 
                     let opti = getCalcPass k biti bit porte1 porte2 in
+                    let tab = Int64.add tab (Int64.mul (Int64.shift_left 1L (k - 1)) (Int64.of_int (count result))) in 
                     instTest instrs (f_ @ _f) pTest;
-                    pass ins result (p + 1) (Float.add res opti)
+                    pass ins result (p + 1) (Float.add res opti) tab
             ) else 
-                Float.add res (Float.mul reference (Float.of_int (nbpass - p - 1)))
+                Float.add res (Float.mul reference (Float.of_int (nbpass - p - 1))), tab 
         in
-            let opti = pass ins result 0 (getCalcPass k biti biti porte1 porte2) in 
+            let opti, tab = pass ins result 0 (getCalcPass k biti biti porte1 porte2) tab in 
             let nopti = Float.mul reference (Float.of_int nbpass) in 
-            Printf.printf "  %F : %F = %F \n" opti nopti (Float.mul 100. (Float.div (Float.sub opti nopti) nopti))
+            Printf.printf "%F : buffer = %Ld \n" (Float.mul 100. (Float.div (Float.sub opti nopti) nopti)) tab
     in 
 
     iter limit (fun k -> aux_get sexpr k) false
