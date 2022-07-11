@@ -1256,20 +1256,29 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
         let reference = Float.mul (Float.pow 2. (Float.of_int biti)) (Float.of_int porte) in 
         let tab = Int64.mul (Int64.shift_left 1L (k - 1)) (Int64.of_int (count result)) in
 
+        Printf.printf "%d : " k;
+
         let rec pass ins result p res tab =   
             if SMap.exists (fun _ v -> v) result && SMap.exists (fun _ v -> not v) result then (
                 printMatrix shape "cipher" result false;
                 Printf.printf "\t\t";
                 let ins = renameio result "plain" "cipher" ins in 
-                    let f_ , _f, _ = generate instrs ins in 
-                    let result = propagate instrs ins in
-                    let bit = interference instrs result shape k sizeMax p in 
-                    let porte1 = countLogic f_ in
-                    let porte2 = countLogic _f in 
-                    let opti = getCalcPass k biti bit porte1 porte2 in
-                    let tab = Int64.add tab (Int64.mul (Int64.shift_left 1L (k - 1)) (Int64.of_int (count result))) in 
-                    instTest instrs (f_ @ _f) pTest;
-                    pass ins result (p + 1) (Float.add res opti) tab
+                let f_ , _f, _ = generate instrs ins in 
+                let result = propagate instrs ins in
+                let bit = interference instrs result shape k sizeMax p in 
+                let porte1 = countLogic f_ in
+                let porte2 = countLogic _f in 
+                let opti = getCalcPass k biti bit porte1 porte2 in
+                
+                let tab =
+                    if bit = k then 
+                        tab
+                    else 
+                        Int64.add tab (Int64.mul (Int64.shift_left 1L (k - 1)) (Int64.of_int (count result))) 
+                in 
+
+                instTest instrs (f_ @ _f) pTest;
+                pass ins result (p + 1) (Float.add res opti) tab
             ) else 
                 Float.add res (Float.mul reference (Float.of_int (nbpass - p - 1))), tab 
         in
