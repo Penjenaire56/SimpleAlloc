@@ -265,10 +265,21 @@ let cleanName name =
 let freshName (k : int) = 
     k + 1 , "tmp" ^ (string_of_int k)
 
-let getIOName name =
+let getIOName name shape =
+    let rec getIndex p s = 
+        match p , s with
+        | [] , _ -> 0
+        | x :: subP , _ :: subS -> 
+            let x = int_of_string x in 
+            let q = List.fold_right ( * ) subS 1 in  
+            x * q + (getIndex subP subS)
+        | _ -> failwith "E"
+    in
     match String.split_on_char '_' name with
-    | n :: k :: _ -> n , int_of_string k
-    | _ -> failwith "ERROR NAME"
+        | n :: p -> 
+            let x = getIndex p shape in 
+             (n , x)
+        | _ -> failwith "ERROR NAME"
 
 let srcName (name : string) (v_io : SSet.t) (io : (bool * string) SMap.t) k = 
     if SSet.mem name v_io then 
@@ -281,18 +292,18 @@ let srcName (name : string) (v_io : SSet.t) (io : (bool * string) SMap.t) k =
     else 
         k, io, [], Var name
 
-let dstName (name : string) (v_io : SSet.t) (io : (bool * string) SMap.t) v2 k = 
+let dstName (name : string) (v_io : SSet.t) (io : (bool * string) SMap.t) v2 k shape = 
     if SSet.mem name v_io then 
         if SMap.mem name io then (
             let b, tmp = SMap.find name io in
             if b then 
                 k, io, [ Move(DVar tmp, v2) ]
             else
-                let n, x = getIOName name in
+                let n, x = getIOName name shape in
                 k, SMap.add name (true,tmp) io, [ Move(DVar tmp, v2); Move(DIO(name, n, x), Var tmp) ]
         ) else
             let k, tmp = freshName k in
-            let n, x = getIOName name in
+            let n, x = getIOName name shape in
             k, SMap.add name (true,tmp) io, [ Move(DVar tmp, v2); Move(DIO(name, n, x), Var tmp) ]
     else 
         k, io , [ Move(DVar name, v2) ]
@@ -354,7 +365,7 @@ let rec exprToInst (e : expr) (k : int) (v_io : SSet.t) (io : (bool * string) SM
     | Bitmask(_, _) -> failwith "Expr Bitmask ERROR"
     | _ -> failwith "Expr ERROR"
 
-let deq_iToInst (d : deq_i) (k : int) (v_io : SSet.t) (io : (bool * string) SMap.t) = 
+let deq_iToInst (d : deq_i) (k : int) (v_io : SSet.t) (io : (bool * string) SMap.t) shape = 
     match d with 
     | Eqn(v, exp, _) -> 
         (match v with
@@ -363,21 +374,21 @@ let deq_iToInst (d : deq_i) (k : int) (v_io : SSet.t) (io : (bool * string) SMap
             let k, v_io, io, i1, v1 = varToInstr x k v_io io in 
             let k, v_io, io, i2, v2 = exprToInst exp k v_io io in 
 
-            let k, io, li = dstName v1 v_io io v2 k in
+            let k, io, li = dstName v1 v_io io v2 k shape in
 
             k, v_io, io, i1 @ i2 @ li
         | _ -> failwith "Too many dst")
     | _ -> failwith "deq_i"
 
-let deqToInst (d : deq list) (v_io : SSet.t) = 
+let deqToInst (d : deq list) (v_io : SSet.t) shape = 
     (List.fold_right (fun x (k,v_io,io,l) -> 
-        let k',v_io',io',l' = (deq_iToInst x.content k v_io io) in
+        let k',v_io',io',l' = (deq_iToInst x.content k v_io io shape) in
             k', v_io', io', l' @ l) d (0, v_io, SMap.empty, []))
 
-let def_iToInst (d : def_i) (v_io : SSet.t) = 
+let def_iToInst (d : def_i) (v_io : SSet.t) shape = 
     match d with
     | Single(_, code) ->
-        let _, v_io, io, instrs = deqToInst code v_io in
+        let _, v_io, io, instrs = deqToInst code v_io shape in
             (v_io, io, instrs)
     | _ -> failwith "Error def_i"
 
@@ -423,7 +434,7 @@ let defToInst (d : def) (max : int -> bool) shape =
 
     let head = v_io in 
 
-    let v_io, io, inst = def_iToInst d.node v_io in
+    let v_io, io, inst = def_iToInst d.node v_io shape in
 
     let rec setInputs li inputs env = 
         match li with
@@ -434,7 +445,7 @@ let defToInst (d : def) (max : int -> bool) shape =
                     e, l
                 else if SMap.mem x inputs then (
                     let name = SMap.find x inputs in 
-                    let n , k = getIOName name in
+                    let n , k = getIOName name shape in
                     SSet.add x e, l @ [Move(DVar x , IO(name,n,k))]
                 )
                 else
@@ -1056,7 +1067,6 @@ let propagate (instrs : inst list) (init : bool SMap.t) =
     in aux init SMap.empty instrs 
 
 let buildTest (path : string) = 
-    Printf.printf "BUILD TEST\n";
     let head = "
 import pyboolector
 from pyboolector import Boolector
@@ -1102,21 +1112,11 @@ let rec clearAcc acc instrs =
 
 let buildUA instrs (dst : string) outs head id pTest =     
     (* let instrs = reduce instrs in *)
-    Printf.printf "analyse...\n";
-
     let (accReg, accStack), newProg = analyse instrs outs 10 in
-    Printf.printf "analyse test...\n";
-
     instTest instrs (List.rev newProg) pTest; 
     let toSet acc = List.fold_left (fun s x -> SSet.add x s) SSet.empty acc in
-
-    Printf.printf "spilling...\n";
     let progFinal = spilling (List.rev newProg) (toSet accReg) (toSet accStack) in
-
-    Printf.printf "spill test...\n";
     instTest (List.rev newProg) progFinal pTest;
-
-    Printf.printf "save...\n";
     slpToC dst (List.rev progFinal) (clearAcc accStack progFinal) ("tmp" :: accReg) head id
 
 let rec iter (k : int) f (b : bool)  = 
@@ -1228,20 +1228,24 @@ let getCalcPass k biti bit p2 p1 =
     let _f = Float.mul (Float.pow 2. (Float.of_int (k + biti - bit))) (Float.of_int p1) in
     Float.add f_ _f 
 
-let getDatas (src : string) shape max limit sizeMax nbpass = 
+let getDatas (src : string) dst shape max limit sizeMax nbpass = 
     let sexpr = readSexpr src in 
     let pTest = buildTest (src ^ "_test.py") in 
 
     let (_, _, _), tem = sexprToInst sexpr (fun _ -> false) shape in 
 
     let aux_get sexpr k = 
-        let (_, ins, _), instrs = sexprToInst sexpr (max k) shape in 
+        let (head, ins, outs), instrs = sexprToInst sexpr (max k) shape in 
         instTest instrs tem pTest;
 
         let porte = countLogic instrs in 
 
-        let f_ , _f, _ = generate instrs ins in 
-
+        let f_ , _f, io = generate instrs ins in 
+        
+        let d = "test/" ^ dst ^ "/" ^ dst ^ "_" ^ string_of_int k ^ "_0.jazz" in 
+        buildUA f_ (d ^ "_1") (SSet.union outs io) head 0 pTest;
+        buildUA _f (d ^ "_2") outs head 1 pTest;
+        
         instTest instrs (f_ @ _f) pTest;
 
         let result = propagate instrs ins in
@@ -1257,15 +1261,24 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
         let tab = Int64.mul (Int64.shift_left 1L (k - 1)) (Int64.of_int (count result)) in
 
         Printf.printf "%d : " k;
+        Printf.printf "%5d\t" biti;
 
         let rec pass ins result p res tab =   
             if SMap.exists (fun _ v -> v) result && SMap.exists (fun _ v -> not v) result then (
                 printMatrix shape "cipher" result false;
                 Printf.printf "\t\t";
+                
                 let ins = renameio result "plain" "cipher" ins in 
-                let f_ , _f, _ = generate instrs ins in 
+                let f_ , _f, io = generate instrs ins in
+
+                let d = "test/" ^ dst ^ "/" ^ dst ^ "_" ^ string_of_int k ^ "_" ^ string_of_int (p + 1) ^ ".jazz" in 
+                buildUA f_ (d ^ "_1") (SSet.union outs io) head 0 pTest;
+                buildUA _f (d ^ "_2") outs head 1 pTest;
+
                 let result = propagate instrs ins in
                 let bit = interference instrs result shape k sizeMax p in 
+                Printf.printf "%5d\t" bit;
+
                 let porte1 = countLogic f_ in
                 let porte2 = countLogic _f in 
                 let opti = getCalcPass k biti bit porte1 porte2 in
@@ -1291,13 +1304,13 @@ let getDatas (src : string) shape max limit sizeMax nbpass =
         
 
 (* Construit un fichier pour jasmin à partir d'un fichier UA0 *)
-let buildUA0 (src : string) (dst : string) = 
+let buildUA0 (src : string) (dst : string) shape = 
     Printf.printf "BUILDUA0...\n";
     let sexpr = readSexpr src in 
     let pTest = buildTest "buildUa0_test.py" in 
 
     Printf.printf "parsing...\n";
-    let (head,ins,outs), instrs = sexprToInst sexpr (fun x -> x >= 32) [128] in 
+    let (head,ins,outs), instrs = sexprToInst sexpr (fun x -> x <= 119) shape in 
 
     Printf.printf "generate...\n";
 
@@ -1312,25 +1325,25 @@ let buildUA0 (src : string) (dst : string) =
 
 let mainGetDatas() = 
     Printf.printf "aes \n";
-    getDatas "test/aes_short.ua0" [128] (fun x k -> x <=  127 - k) 26 128 10;
+    getDatas "test/aes_short.ua0" "aes_short" [128] (fun x k -> x <=  127 - k) 26 128 10;
 
     Printf.printf "rectangle \n";
-    getDatas "test/rectangle_short.ua0" [4;16] (fun x k -> x <=  63 - k) 17 64 10;
+    getDatas "test/rectangle_short.ua0" "rectangle_short" [4;16] (fun x k -> x <=  63 - k) 17 64 25;
 
     Printf.printf "present \n";
-    getDatas "test/present_short.ua0" [64] (fun x k -> x <=  63 - k) 64 64 10;
+    getDatas "test/present_short.ua0" "present_short" [64] (fun x k -> x <=  63 - k) 64 64 31;
 
     Printf.printf "xoodoo \n";
-    getDatas "test/xoodoo_short.ua0" [3;4;16] (fun x k -> x <= 75 - k) 24 192 10;
+    getDatas "test/xoodoo_short.ua0" "xoodoo_short" [3;4;16] (fun x k -> x <= 75 - k) 24 192 12;
     
     Printf.printf "gift_bitslice \n";
-    getDatas "test/gift_bitslice_short.ua0" [4;32] (fun x k -> x <= 127 - k) 32 128 10;
+    getDatas "test/gift_bitslice_short.ua0" "gift_bitslice_short" [4;32] (fun x k -> x <= 127 - k) 32 128 40;
 
     Printf.printf "photon_bitslice \n";
-    getDatas "test/photon_bitslice_short.ua0" [8;8;4] (fun x k -> x <= 87 - k) 24 256 10;
+    getDatas "test/photon_bitslice_short.ua0" "photon_bitslice_short" [8;8;4] (fun x k -> x <= 87 - k) 24 256 12;
 
-    Printf.printf "ace_bitslice_short \n";
-    getDatas "test/ace_bitslice_short.ua0" [5;2;32] (fun x k -> x <= 161 - k) 132 320 10;
+    (* Printf.printf "ace_bitslice_short \n";
+    getDatas "test/ace_bitslice_short.ua0" "ace_bitslice_short" [5;2;32] (fun x k -> x <= 161 - k) 132 320 16; *)
 
     (* Printf.printf "gimli_bitslice \n";
     getDatas "test/gimli_bitslice_short.ua0" [3;4;32] (fun x k -> x <= 107 - k) 16 384 10; *)
@@ -1341,9 +1354,10 @@ let main () =
     (* doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c"; *)
     (* buildUA0 "test/aes_short.ua0" "test/rectangle.jazz" *) 
     (* interference "test/aes_short.ua0" *)
+    (* getDatas "test/gift_bitslice_short.ua0" "gift_bitslice_short" [4;32] (fun x k -> x <= 127 - k) 32 128 40; *)
     mainGetDatas()
-    (* doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c";
-    doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c" *)
+    
+    (* doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c" *)
 ;;
 
 main ()
