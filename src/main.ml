@@ -1258,7 +1258,7 @@ let getDatas (src : string) dst shape max limit sizeMax nbpass =
         in
 
         let reference = Float.mul (Float.pow 2. (Float.of_int biti)) (Float.of_int porte) in 
-        let tab = Int64.mul (Int64.shift_left 1L (k - 1)) (Int64.of_int (count result)) in
+        let tab = Int64.mul (Int64.shift_left 1L k) (Int64.of_int (count result)) in
 
         Printf.printf "%d : " k;
         Printf.printf "%5d\t" biti;
@@ -1287,7 +1287,7 @@ let getDatas (src : string) dst shape max limit sizeMax nbpass =
                     if bit = k then 
                         tab
                     else 
-                        Int64.add tab (Int64.mul (Int64.shift_left 1L (k - 1)) (Int64.of_int (count result))) 
+                        Int64.add tab (Int64.mul (Int64.shift_left 1L k) (Int64.of_int (count result))) 
                 in 
 
                 instTest instrs (f_ @ _f) pTest;
@@ -1297,7 +1297,7 @@ let getDatas (src : string) dst shape max limit sizeMax nbpass =
         in
             let opti, tab = pass ins result 0 (getCalcPass k biti biti porte1 porte2) tab in 
             let nopti = Float.mul reference (Float.of_int nbpass) in 
-            Printf.printf "%F : buffer = %Ld \n" (Float.mul 100. (Float.div (Float.sub opti nopti) nopti)) tab
+            Printf.printf "%F : buffer = %Ld \n" (Float.mul 100. (Float.div (Float.sub opti nopti) nopti)) (Int64.div tab 8L)
     in 
 
     iter limit (fun k -> aux_get sexpr k) false
