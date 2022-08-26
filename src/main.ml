@@ -32,8 +32,6 @@ type op =
     OOr | OXor | OAndn | 
     OMasked
 
-type index = src
-
 type inst = 
     | Oper of op * dst * src * src
     | Move of dst * src
@@ -1132,13 +1130,13 @@ let rec iter (k : int) f (b : bool)  =
     else
         ()
 
-let rec findFirst max (k : int) (f : int -> int option) = 
+let rec findFirst (k : int) max (f : int -> int option) = 
     if k < max then 
         match f k with 
         | Some s -> 
             Some s
         | None -> 
-            findFirst max (k + 1) f
+            findFirst (k + 1) max f
     else
         None
 
@@ -1152,16 +1150,16 @@ let rec printMatrix list name env b =
     | x :: subL -> 
         let _ = iter x (fun k -> printMatrix subL (name ^ "_" ^ (string_of_int k)) env b) b in ()
 
-let rec firstInter list name env y start = 
-    match list with
+let rec firstInter shape name env y start = 
+    match shape with
     | [] -> 
         if SMap.find name env || y < start then 
             None
-        else
+        else 
             Some y
 
     | x :: subL -> 
-        findFirst x start (fun k -> 
+        findFirst 0 x (fun k -> 
             let nb = y + (List.fold_right ( * ) subL k) in 
             let n = name ^ "_" ^ (string_of_int k) in
             firstInter subL n env nb start 
@@ -1185,11 +1183,19 @@ let renameio ma name old ins =
     ) ma ins 
 
 let interference (instrs : inst list) result shape start sizeMax p =
+    let updt s env b = 
+        match SMap.find_opt s env, b with
+            | Some true, false -> SMap.add s false env
+            | None , _ -> SMap.add s b env
+            | _, _ -> env
+    in
+    
     let addToEnv env out src b =  
         match src with
         | Val _ -> env , out
-        | Var s -> SMap.add s b env, out
-        | IO(s,n,_) -> SMap.add s b env, if n = "plain" then SMap.add s b out else out
+        | Var s -> updt s env b, out 
+        | IO(s,n,_) ->
+            updt s env b , (if n = "plain" then updt s out b else out) 
     in
 
     let rec aux_inter (env : bool SMap.t) (out : bool SMap.t) (instrs : inst list) = 
@@ -1210,15 +1216,15 @@ let interference (instrs : inst list) result shape start sizeMax p =
     in 
     
     let rec interf result p = 
+        let env = aux_inter result SMap.empty (List.rev instrs) in 
+        let env = renameio env "cipher" "plain" env in 
         match p with
         | 0 ->
-            let env = aux_inter result SMap.empty (List.rev instrs) in 
             (match firstInter shape "plain" env 0 start with
                 | None -> sizeMax
-                | Some(x) -> x)
+                | Some x -> x
+            )
         | k -> 
-            let env = aux_inter result SMap.empty (List.rev instrs) in 
-            let env = renameio env "cipher" "plain" result in 
                 interf env (k - 1)
     in
         interf result p  
@@ -1251,7 +1257,7 @@ let getDatas (src : string) dst shape max limit sizeMax nbpass =
         let result = propagate instrs ins in
         let biti = interference instrs result shape k sizeMax 0 in 
         let porte1 = countLogic f_ in
-        let porte2 = countLogic _f in 
+        let porte2 = countLogic _f in   
 
         let count r = 
             SMap.fold (fun _ b x -> if b then x else x + 1) r 0
@@ -1276,7 +1282,7 @@ let getDatas (src : string) dst shape max limit sizeMax nbpass =
                 buildUA _f (d ^ "_2") outs head 1 pTest;
 
                 let result = propagate instrs ins in
-                let bit = interference instrs result shape k sizeMax p in 
+                let bit = interference instrs result shape k sizeMax (p + 1) in 
                 Printf.printf "%5d\t" bit;
 
                 let porte1 = countLogic f_ in
@@ -1350,14 +1356,16 @@ let mainGetDatas() =
 
 ;;
 
-let main () =     
+let main () =    
+mainGetDatas() 
     (* doubleMain "test/slp_630.txt" "test/slp_630.jazz" "test/slp_630.c"; *)
     (* buildUA0 "test/aes_short.ua0" "test/rectangle.jazz" *) 
     (* interference "test/aes_short.ua0" *)
-    (* getDatas "test/gift_bitslice_short.ua0" "gift_bitslice_short" [4;32] (fun x k -> x <= 127 - k) 32 128 40; *)
-    mainGetDatas()
+    (* getDatas "test/gift_bitslice_short.ua0" "gift_bitslice_short" [4;32] (fun x k -> x <= 127 - k) 32 128 40; 
+   
+    getDatas "test/aes_short.ua0" "aes_short" [128] (fun x k -> x <=  127 - k) 26 128 10;
     
-    (* doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c" *)
+    doubleMain "test/slp_big.txt" "test/slp_big.jazz" "test/slp_big.c" *)
 ;;
 
 main ()
