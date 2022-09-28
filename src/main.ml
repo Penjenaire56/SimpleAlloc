@@ -5,7 +5,7 @@ module SSet = Set.Make(String)
 module IMap = Map.Make(Int)
 module SMap = Map.Make(String)
 
-type memory = {
+type memory = { 
     k : int;
     max : int;
     free : int IMap.t;
@@ -129,6 +129,7 @@ let pprintInstC (i : inst) =
     | Move(dst,src) -> 
         printDst dst ^ " = " ^ printSrc src ^ ";"
 
+(* Génère les test python avec boolector *)
 let instTest (i1 : inst list) (i2 : inst list) pTest = 
     pTest "
 btor = Boolector()
@@ -260,6 +261,7 @@ let log_opToOp (a : log_op) =
 let cleanName name =
     String.concat "" (String.split_on_char '\'' name)
 
+
 let freshName (k : int) = 
     k + 1 , "tmp" ^ (string_of_int k)
 
@@ -339,6 +341,7 @@ let rec varToInstr (v : var) (k : int) (v_io : SSet.t) (io : (bool * string) SMa
 
     | _ -> failwith "varToINst"
 
+(* Usuba0 -> représntation intermédiaire *)
 let rec exprToInst (e : expr) (k : int) (v_io : SSet.t) (io : (bool * string) SMap.t) = 
     match e with
     | Const(i, _) -> 
@@ -389,11 +392,6 @@ let def_iToInst (d : def_i) (v_io : SSet.t) shape =
         let _, v_io, io, instrs = deqToInst code v_io shape in
             (v_io, io, instrs)
     | _ -> failwith "Error def_i"
-
-type stability = 
-    | Stable
-    | UnStable
-    | Mixed of (int * int) list  
 
 type structSize = 
     | Len of int
@@ -505,6 +503,7 @@ let addVars (v : SSet.t) (n : string) =
 let getIndice (name : string) = 
     int_of_string (String.sub name 1 ((String.length name) - 1))
 
+(* Récupère la dst du code à trois adresses *)
 let getDST (s : string) (v : SSet.t) = 
     match String.get s 0 with
     | '0' .. '9' -> 
@@ -516,6 +515,7 @@ let getDST (s : string) (v : SSet.t) =
     | _ -> 
         DVar s, addVars v s
 
+(* Récupère les Src du code à trois adresses *)
 let getSRC (s : string) (v : SSet.t) = 
     match String.get s 0 with
     | '0' .. '9' -> 
@@ -723,7 +723,7 @@ let update_usage (mem : memory) (vars : SSet.t) = {
     regs = mem.regs;
 }
 
-let init (initials : SSet.t) (max : int) = (* TODO stack if enougth variables *)
+let init (initials : SSet.t) (max : int) =
     let (k, regs, usage) = SSet.fold 
         (fun s (k,m,u) -> k + 1, (IMap.add k s m), (IMap.add k 0 u)) 
         initials (0, IMap.empty, IMap.empty) 
@@ -786,6 +786,7 @@ let analyse (instr : inst list) (initials : SSet.t) (max : int) =
     let (regAcc, stackAcc), prog = cross initials mem instr in 
     let optiProg = clean prog in (regAcc, stackAcc), optiProg
 
+(* Traduction de la représentation intermédiaire vers Jasmin *)
 let slpToJasmin dst prog stack reg head id = 
     let header = 
         (SSet.fold(fun x str -> str ^ ", reg u64 " ^ x) head ("export fn p" ^ (string_of_int id) ^ "(reg u64 _tmp")) ^ "){\n"
@@ -802,6 +803,7 @@ let slpToJasmin dst prog stack reg head id =
         output_string saveProg (header ^ declaration ^ body ^ footer);
         close_out saveProg
 
+(* Traduction de la représentation intermédiaire vers C *)
 let slpToC dst prog stack reg head id = 
     let header = 
         (SSet.fold(fun x str -> str ^ ", uint64_t* " ^ x) head ("void p" ^ (string_of_int id) ^ "(uint64_t* _tmp")) ^ "){\n"
@@ -926,7 +928,7 @@ let spill (i : inst) (sta : string) (reg : string) =
     | Oper(o, dst, s1 , s2) -> 
         Oper(o, rename_dst dst, rename_src s1, rename_src s2) 
       
-
+(* Algorithme de mise en pile *)
 let spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) = 
     let update_used (used : SSet.t) reg stack =
         match SSet.find_opt reg used, SSet.find_opt stack used with
@@ -976,6 +978,7 @@ let spilling (prog : inst list) (accReg : SSet.t) (accStack : SSet.t) =
     )
     in aux prog accReg accStack (SSet.empty)
 
+(* Algorithme de transformation de programme séparant f en _f et f_ *)
 let generate (instrs : inst list) (init : bool SMap.t) =
     let testSrc (exp : src) env = 
         match exp with
@@ -1026,6 +1029,7 @@ let generate (instrs : inst list) (init : bool SMap.t) =
     let _f, f_, io = aux instrs init [] [] (SSet.empty) 0 in 
         (List.rev (clean _f), List.rev (clean f_), io)
 
+(* Analyse de propagation *)
 let propagate (instrs : inst list) (init : bool SMap.t) = 
     let testSrc (exp : src) env = 
         match exp with
@@ -1064,6 +1068,7 @@ let propagate (instrs : inst list) (init : bool SMap.t) =
    
     in aux init SMap.empty instrs 
 
+(* Construction des test SMT *)
 let buildTest (path : string) = 
     let head = "
 import pyboolector
@@ -1182,6 +1187,7 @@ let renameio ma name old ins =
             SMap.add n v m
     ) ma ins 
 
+(* Algorithme d'interférence *)
 let interference (instrs : inst list) result shape start sizeMax p =
     let updt s env b = 
         match SMap.find_opt s env, b with
@@ -1234,8 +1240,23 @@ let getCalcPass k biti bit p2 p1 =
     let _f = Float.mul (Float.pow 2. (Float.of_int (k + biti - bit))) (Float.of_int p1) in
     Float.add f_ _f 
 
+(* calcul et affiche l'ensemble des gains théoriques pour un algorithme src donné
+    dst est le fichier dans lequels les tests et les différentes variantes du programmes sont générés
+    
+    shape est la forme des données d'entrées 
+        [n] pour une simple suite de n bits
+        [x;y] pour une matrice d'entrée de x * y
+
+    max est une fonction permettant de calculer la zone variable en fonction de l'algorithme
+
+    limit nombre limite de bit instable intéressant à calculer 
+
+    sizeMax est la taille des données d'entrées 
+
+    nbpass est le nombre de rondes 
+*)
 let getDatas (src : string) dst shape max limit sizeMax nbpass = 
-    let sexpr = readSexpr src in 
+    let sexpr = readSexpr src in  
     let pTest = buildTest (src ^ "_test.py") in 
 
     let (_, _, _), tem = sexprToInst sexpr (fun _ -> false) shape in 
@@ -1291,7 +1312,7 @@ let getDatas (src : string) dst shape max limit sizeMax nbpass =
                 
                 let tab =
                     if bit = k then 
-                        tab
+                        tab 
                     else 
                         Int64.add tab (Int64.mul (Int64.shift_left 1L k) (Int64.of_int (count result))) 
                 in 
@@ -1317,9 +1338,9 @@ let buildUA0 (src : string) (dst : string) shape =
 
     Printf.printf "parsing...\n";
     let (head,ins,outs), instrs = sexprToInst sexpr (fun x -> x <= 119) shape in 
-
+ 
     Printf.printf "generate...\n";
-
+ 
     let f_ , _f, io = generate instrs ins in 
 
     buildUA f_ (dst ^ "_1") (SSet.union outs io) head 0 pTest;
@@ -1329,6 +1350,7 @@ let buildUA0 (src : string) (dst : string) shape =
     let f = f_ @ _f in 
     instTest instrs f pTest
 
+(* Calculs des données pour tout les algorithme de chiffrement *)
 let mainGetDatas() = 
     Printf.printf "aes \n";
     getDatas "test/aes_short.ua0" "aes_short" [128] (fun x k -> x <=  127 - k) 26 128 10;
